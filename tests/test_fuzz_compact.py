@@ -42,9 +42,7 @@ def _heads(repo):
 
 
 def _manifests(repo, heads):
-    return {
-        name: repo._read_layer(head)[1] for name, head in heads.items()
-    }
+    return {name: repo._read_layer(head)[1] for name, head in heads.items()}
 
 
 def _count(repo):
@@ -103,9 +101,7 @@ def test_compact_fuzz_oracle(seed, project):
                 if victims:
                     name = rng.choice(victims)
                     with repo._db:
-                        repo._db.execute(
-                            "DELETE FROM branches WHERE name = ?", (name,)
-                        )
+                        repo._db.execute("DELETE FROM branches WHERE name = ?", (name,))
                     branches.remove(name)
         except FirnpackError:
             continue  # a guard refusing mid-sequence is legal fuzz input
@@ -129,7 +125,6 @@ def test_compact_fuzz_oracle(seed, project):
         manifests_after = _manifests(repo, heads_after)
         for name in heads_after:
             assert manifests_after[name] == manifests_before[name], (
-                f"seed {seed}: branch {name!r} lost tree content in the "
-                f"rewrite"
+                f"seed {seed}: branch {name!r} lost tree content in the rewrite"
             )
     repo.close()
