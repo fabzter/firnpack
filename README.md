@@ -3,6 +3,7 @@
 > a glacier for your files — every commit a single packed layer of history.
 
 [![ci](https://github.com/fabzter/firnpack/actions/workflows/ci.yml/badge.svg)](https://github.com/fabzter/firnpack/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/firnpack)](https://pypi.org/project/firnpack/)
 ![python](https://img.shields.io/badge/python-3.13.16%20%E2%80%93%203.15-blue)
 
 **firnpack** is version control for people who don't want version control
@@ -17,15 +18,15 @@ holds 102 files. That's the whole design.
 
 ## Install
 
-Requires Python 3.13.16 or newer. From a clone:
+Requires Python 3.13.16 or newer.
 
 ```
-pip install .
+pip install firnpack
 ```
 
-which registers both `firnpack` and the shorter `firn` command. (Or run the
-single module directly: `python firnpack.py …` — the whole engine is one
-file.)
+which registers both `firnpack` and the shorter `firn` command. (From a
+clone, `pip install .` does the same; or run the single module directly:
+`python firnpack.py …` — the whole engine is one file.)
 
 ## Quickstart
 
@@ -158,9 +159,12 @@ Excluded files are never silently hidden: `status` counts them, and
 
 ## Status
 
-v1.0 candidate: the full command surface above is implemented and tested
-(unit, property and end-to-end CLI suites, CI across Linux, Windows and
-macOS). PyPI publication follows the v1.0.0 tag.
+Released: `firnpack 1.0.0` is on PyPI (wheel + sdist), tagged `v1.0.0`.
+The full command surface above is implemented and tested (unit, property,
+seeded-fuzz and end-to-end CLI suites; CI across Linux, Windows and macOS;
+the published artifact re-verified by installing from PyPI and running the
+quickstart). Development continues on `main`; see
+[`CHANGELOG.md`](CHANGELOG.md) and [`docs/decisions.md`](docs/decisions.md).
 
 ## License
 
