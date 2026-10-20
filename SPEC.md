@@ -113,7 +113,17 @@
 > collapsed merges — archived, planned as `layers_garbage_collected`,
 > reported in the result), and deferred FK enforcement in the swap
 > transaction (consistency checked at COMMIT against the guard-proven
-> final state). Changelog wording normalized (v0.2→v0.3 entry).
+> final state). Same day, owner item (a): the rewrite closure extends
+> beyond the chain — reachable survivors whose deleted-set references
+> all land in KEPT rows (forks on the kept range, stacked branches,
+> kept-merge stubs) are rewritten and their branch heads remapped, so
+> a working branch on top of main's HEAD compacts without a cliff;
+> refusals narrow to ancestry through COLLAPSED rows. Remaps and the
+> off-chain count are reported (`branches_remapped`,
+> `off_chain_rewritten`, CLI echo — never silent). §5 new-path mode
+> sentence corrected to the CRT extension-derived reality (a new
+> `.bat` packs `0o755` on Windows; windows-gated test added).
+> Changelog wording normalized (v0.2→v0.3 entry).
 
 ---
 
@@ -310,7 +320,10 @@ contains, in this order:
   The disk value cannot drift there (nothing can change it), and layers
   written on POSIX must not false-drift when the repo is used from
   Windows: a repo copied between machines keeps its exec bits exactly.
-  Genuinely new paths (no head entry) pack as `0o644`. Symlinks are
+  Genuinely new paths (no head entry) take the disk value: on POSIX the
+  chmod bit; on Windows the CRT's extension-derived bit — a new
+  `.exe`/`.bat`/`.cmd`/`.com` packs `0o755` (and stays executable when
+  restored on POSIX), everything else `0o644`. Symlinks are
   unaffected (`0o777` always).
 - pax headers: none (no long-path pax records for paths ≤ 100 chars; longer
   paths use ustar prefix splitting; beyond that, pax `path` record only —
@@ -764,19 +777,33 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   sketch):
   1. a merge is pending (`merge_theirs` set) — compact refuses outright;
   2. any *other* branch head resolves into the collapsed set, **or any
-     reachable survivor's ancestry enters the deleted set** (a branch
-     cut from inside the range and committed on has its head outside
-     the range but its parent inside — the refusal names the branch);
+     reachable survivor's ancestry passes through COLLAPSED rows** (a
+     branch cut from inside the collapsed range and committed on has
+     its head outside the range but its parent inside — the refusal
+     names the branch; a fork on top of KEPT rows is not refused, it
+     is rewritten — next paragraph);
   3. the pin resolves into the collapsed set;
   4. the kept range contains a merge layer whose `second_parent` reaches
      below the cut (re-pointing it would invent history — refuse, or
      choose a higher cutoff; `--keep 1` always works and is the
      recommended deep-clean).
-  **Remap instead of refuse**: a branch head sitting exactly at a KEPT
-  layer is repointed to that layer's rewritten id in the same
-  transaction — the branch follows the rewrite, and its merge base with
-  the compacted branch is preserved (the v0.13 "warns: loses merge
-  base" case no longer exists).
+  **Rewrite closure and remap (owner item (a), 2026-10-20)**: the
+  rewrite is not chain-only. Every reachable survivor whose deleted-set
+  references all land in KEPT rows — a working branch forked from the
+  kept range, branches stacked on such a fork, merge stubs hanging off
+  kept merge layers — joins the rewrite set: same tree, message,
+  author and timestamps, re-parented through the remap in topological
+  order (owner-ratified: the common state of a branch with commits on
+  top of main's HEAD compacts without a cliff). Branch heads at any
+  rewritten id — kept layer or survivor — are repointed in the same
+  transaction, so no live line of history is ever stranded on a
+  deleted id and the v0.13 "warns: loses merge base" case no longer
+  exists. The plan and result carry `off_chain_rewritten`; the remap
+  is never silent: the dry-run plan lists `branches_remapped` as
+  `{name, from}` entries (the new id is unknowable before execution —
+  rewritten ids hash a record stamped at run time), the executed
+  result reports `{name, from, to}`, and the CLI names every moved
+  branch.
   **Garbage collection**: unreachable survivors that reference the
   deleted set — amend orphans (the replaced head stays a live row until
   a compact), second-parent stubs of collapsed merges with their branch
@@ -1175,10 +1202,14 @@ commit/branch/merge sequences asserting invariants:
   each path; probe success → links recreated;
 - compact: `--dry-run` mutates nothing; `--keep 1` squashes to one layer
   and deletes only unreachable files; merge-bearing kept ranges refuse;
-  branches/pins reaching the collapsed set refuse; merge-pending refuses;
-  kept-range branches keep their layers and get the merge-base warning;
-  `--archive` zip contains the compacted range; reminder fires once per
-  threshold crossing (rate-limited);
+  branches/pins reaching the collapsed set refuse; merge-pending
+  refuses; off-chain forks whose ancestry passes through collapsed
+  rows refuse (named); forks on kept rows and branches stacked on them
+  rewrite and remap (reported via `branches_remapped` and
+  `off_chain_rewritten`, echoed by the CLI); unreachable survivors are
+  garbage-collected and archived; `--archive` zip contains the
+  content-loss set; reminder fires once per threshold crossing
+  (rate-limited);
 - compact crash windows (simulated via os._exit hooks): killed after new
   layer files are written but before the DB swap → old history intact,
   new files swept as orphans; killed after the swap but before old-file

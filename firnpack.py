@@ -379,11 +379,12 @@ def _disk_exec_bit(st) -> bool:
     """True when the file's execute bit is meaningfully set.
 
     POSIX: st_mode & 0o100 (chmod drives it). Windows: there is no chmod
-    bit — the value is extension-derived and cannot be changed by the
-    user, so it participates in identity (same file -> same id) but never
-    drifts (exec-in-identity ratified as owner decision 1a, 2026-10-20;
-    the Windows carry-forward policy is separately PROPOSED, pending
-    ratification as item B).
+    bit — the CRT reports S_IEXEC from the file extension (.exe/.bat/
+    .cmd/.com), so the value is extension-derived and cannot be changed
+    by the user: it participates in identity (same file -> same id) but
+    never drifts (exec-in-identity ratified as owner decision 1a,
+    2026-10-20; the Windows carry-forward policy is ratified as item B,
+    2026-10-20 — SPEC §5).
     """
     return bool(st.st_mode & 0o100)
 
@@ -1595,15 +1596,21 @@ class Repo:
         kept = chain[:keep]
         collapsed = set(chain[keep:])
 
-        # --- reference-based safety analysis (SPEC 9.9) ---
-        # Rows going away: collapsed ones, plus kept ones (kept layers
-        # are rewritten under new ids). Anything still pointing at
-        # them must be remapped, refused, or garbage-collected:
-        #   - branch heads at a kept id -> remapped to the new id
+        # --- reference-based safety analysis (SPEC 9.9, owner item
+        # (a) 2026-10-20) ---
+        # Rows going away: collapsed ones, plus every layer the
+        # rewrite replaces (kept chain layers AND off-chain survivors
+        # that hang off them — a branch forked from the kept range
+        # follows the rewrite instead of blocking it). Anything still
+        # pointing at the deleted set is remapped, rewritten, refused,
+        # or garbage-collected:
+        #   - branch heads at a rewritten id (kept or survivor) ->
+        #     remapped to the new id
         #   - branch heads or the pin inside collapsed -> refusal
-        #   - a reachable survivor whose ancestry (parent or
-        #     second_parent, any depth) enters the deleted set ->
-        #     refusal: live history would lose its parents
+        #   - a reachable survivor whose ancestry passes through
+        #     COLLAPSED rows -> refusal: that history is genuinely
+        #     squashed away; a fork on top of KEPT rows is rewritten
+        #     instead (no cliff for the common working-branch case)
         #   - an unreachable survivor referencing the deleted set ->
         #     garbage-collected (amend orphans, second-parent stubs
         #     of collapsed merges), archived like any dropped layer
@@ -1615,17 +1622,6 @@ class Repo:
         head_names = {
             h: n for n, h in self._db.execute("SELECT name, head FROM branches")
         }
-        branch_remaps: dict[str, str] = {}
-        for name, head in self._db.execute("SELECT name, head FROM branches"):
-            if name == wt.get("head_branch"):
-                continue  # the worktree branch repoints to final_head
-            if head in collapsed:
-                raise FirnpackError(
-                    f"branch {name!r} points into the collapsed range — "
-                    f"raise --keep or delete the branch first"
-                )
-            if head in kept:
-                branch_remaps[name] = head
         if wt["head_kind"] == "pin" and wt["head_id"] in collapsed:
             raise FirnpackError("the pinned head reaches into the collapsed range")
         for lid in kept:
@@ -1654,40 +1650,64 @@ class Repo:
             for ref in all_rows[cur]:
                 if ref:
                     stack.append(ref)
-        # fixpoint: survivors referencing the deleted set are either
-        # reachable (refuse — a live line of history depends on them)
-        # or garbage (collect)
+        # refusal: a reachable survivor whose ancestry passes through
+        # COLLAPSED rows loses genuine history — refuse, naming the
+        # branch when the survivor is itself a head
+        for rid in sorted(reachable - deleted):
+            p, s = all_rows[rid]
+            if p in collapsed or s in collapsed:
+                who = head_names.get(rid)
+                detail = (
+                    f"branch {who!r} descends from layers that would be collapsed"
+                    if who
+                    else f"layer {rid[:12]} is still referenced, but "
+                    f"its ancestry reaches into the collapsed range"
+                )
+                raise FirnpackError(
+                    f"{detail} — raise --keep, or merge/delete the branch first"
+                )
+        # garbage: UNREACHABLE rows referencing anything that vanishes
+        # (deleted chain rows or rewritten survivors) or already-
+        # collected garbage — amend orphans, collapsed-merge stubs,
+        # orphans left behind on rewritten forks. Monotone fixpoint:
+        # every wave row leaves the candidate pool by joining gc, so
+        # the loop terminates.
+        vanish = deleted | reachable
         gc: set[str] = set()
         while True:
             wave = {
                 rid
                 for rid, (p, s) in all_rows.items()
-                if rid not in deleted
+                if rid not in vanish
                 and rid not in gc
-                and (p in deleted or p in gc or s in deleted or s in gc)
+                and (p in vanish or p in gc or s in vanish or s in gc)
             }
             if not wave:
                 break
-            for rid in sorted(wave):
-                if rid in reachable:
-                    who = head_names.get(rid)
-                    detail = (
-                        f"branch {who!r} descends from layers that would be collapsed"
-                        if who
-                        else f"layer {rid[:12]} is still referenced, but "
-                        f"its ancestry reaches into the collapsed range"
-                    )
-                    raise FirnpackError(
-                        f"{detail} — raise --keep, or merge/delete the branch first"
-                    )
             gc |= wave
+        # the rewrite set: kept chain layers plus every reachable
+        # survivor (forks, stacked branches, merge stubs) — each is
+        # re-parented through remap, so no live line of history is
+        # stranded on a deleted id
+        rewrite_set = set(kept) | (reachable - deleted)
+        branch_remaps: dict[str, str] = {}
+        for name, head in self._db.execute("SELECT name, head FROM branches"):
+            if name == wt.get("head_branch"):
+                continue  # the worktree branch repoints to final_head
+            if head in collapsed:
+                raise FirnpackError(
+                    f"branch {name!r} points into the collapsed range — "
+                    f"raise --keep or delete the branch first"
+                )
+            if head in rewrite_set:
+                branch_remaps[name] = head
 
         # the cut layer's tree becomes the foundation
         cut_id = chain[keep]
         _, cut_manifest, _ = self._read_layer(cut_id)
         old_total = sum(f.stat().st_size for f in self.layers_dir.glob("*.firn"))
-        new_writes = 1 + len(kept)  # foundation + rewritten kept
-        avg = old_total / max(len(chain), 1)
+        new_writes = 1 + len(rewrite_set)  # foundation + every rewrite
+        avg = old_total / max(len(all_rows), 1)
         peak = old_total + int(avg * new_writes)
 
         if dry_run:
@@ -1696,8 +1716,14 @@ class Repo:
                 "keep": keep,
                 "layers_total": len(chain),
                 "layers_dropped": len(collapsed),
-                "layers_rewritten": len(kept),
+                "layers_rewritten": len(rewrite_set),
+                "off_chain_rewritten": len(rewrite_set) - len(kept),
                 "layers_garbage_collected": len(gc),
+                # "to" is unknowable at plan time: rewritten ids hash a
+                # record whose created_at is stamped at execution
+                "branches_remapped": [
+                    {"name": n, "from": old} for n, old in branch_remaps.items()
+                ],
                 "bytes_reclaimed": sum(
                     self._layer_path(lid).stat().st_size for lid in collapsed | gc
                 ),
@@ -1759,11 +1785,34 @@ class Repo:
                 cut_files.append(path)
         fsize = self._write_layer(foundation_id, fmeta, cut_files, cut_links)
 
-        # rewrite kept layers onto the foundation, newest-last so each
-        # parent exists when referenced
+        # rewrite every layer of the rewrite set onto the foundation:
+        # the kept chain first (oldest first), then off-chain
+        # survivors (forks, stacked branches, merge stubs) once their
+        # parents are placed — topological order keeps every parent
+        # reference resolvable as the walk runs
         remap = {cut_id: foundation_id}
         new_rows = []
-        for lid in reversed(kept):  # oldest kept first
+        order = list(reversed(kept))
+        placed = set(order) | {cut_id}
+        pending = rewrite_set - placed
+        while pending:
+            progressed = False
+            for lid in sorted(pending):
+                p, s = all_rows[lid]
+                if p in placed and (s is None or s in placed):
+                    order.append(lid)
+                    placed.add(lid)
+                    pending.discard(lid)
+                    progressed = True
+            if not progressed:
+                # the guard phase proved this unreachable: every
+                # survivor's deleted-set references were refused or
+                # collected before we got here
+                raise FirnpackError(
+                    "internal: rewrite order stuck — this is a bug, "
+                    "report it with the repository"
+                )
+        for lid in order:
             row = self._db.execute(
                 "SELECT tree_id, parent, second_parent, message, author,"
                 " created_at FROM layers WHERE id = ?",
@@ -1825,7 +1874,7 @@ class Repo:
                 ).fetchone()[0],
                 r[9],
             )
-            for r, lid in zip(new_rows, reversed(kept), strict=True)
+            for r, lid in zip(new_rows, order, strict=True)
         ]
 
         # ONE DB transaction: swap everything. defer_foreign_keys
@@ -1879,16 +1928,17 @@ class Repo:
                     _utcnow(),
                 ),
             )
-            for lid in gc:
+            for lid in gc | (rewrite_set - set(kept)):
                 self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
             for lid in sorted(
                 collapsed | set(kept),
                 key=lambda x: chain.index(x) if x in chain else 10**9,
             ):
                 self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
-        # delete now-unreachable old files (write-once discipline ends
-        # only here, under explicit permission)
-        for lid in collapsed | set(kept) | gc:
+        # delete now-replaced old files (write-once discipline ends
+        # only here, under explicit permission): collapsed content,
+        # collected garbage, and the old ids of every rewritten layer
+        for lid in collapsed | rewrite_set | gc:
             old = self._layer_path(lid)
             if old.exists() and lid not in remap.values():
                 with contextlib.suppress(OSError):
@@ -1898,7 +1948,12 @@ class Repo:
             "status": "compacted",
             "kept": len(kept) + 1,
             "dropped": len(collapsed),
+            "off_chain_rewritten": len(rewrite_set) - len(kept),
             "garbage_collected": len(gc),
+            "branches_remapped": [
+                {"name": n, "from": old, "to": remap[old]}
+                for n, old in branch_remaps.items()
+            ],
             "new_head": final_head,
             "archive": str(archive_path) if archive_path else None,
         }
@@ -2609,6 +2664,11 @@ def _cmd_compact(args) -> int:
             print(f"  garbage collected:{result['layers_garbage_collected']}")
         print(f"  bytes reclaimed: {result['bytes_reclaimed']}")
         print(f"  peak disk needed:{result['peak_disk_needed']}")
+        for b in result["branches_remapped"]:
+            print(
+                f"  branch {b['name']!r} at {b['from'][:12]} will follow "
+                f"the rewrite (remapped to its new id)"
+            )
         print("  run again with --yes to execute")
         return 0
     if status == "compacted":
@@ -2621,6 +2681,11 @@ def _cmd_compact(args) -> int:
             print(
                 f"  {result['garbage_collected']} unreachable layer(s) "
                 f"garbage-collected"
+            )
+        for b in result["branches_remapped"]:
+            print(
+                f"  branch {b['name']!r} remapped {b['from'][:12]} -> "
+                f"{b['to'][:12]} (follows the rewrite)"
             )
         if result["archive"]:
             print(f"  removed layers archived to {result['archive']}")

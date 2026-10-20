@@ -565,8 +565,10 @@ class TestJourneySafety:
         firn(project, "branch", "feature")
         p = firn(project, "compact", "--keep", "2", "--dry-run")
         assert "compact plan" in p.stdout
+        assert "will follow the rewrite" in p.stdout  # remap is never silent
         p = firn(project, "compact", "--keep", "2", "--yes")
         assert "compacted" in p.stdout
+        assert "remapped" in p.stdout
         # feature was at main's head -> remapped along with it
         p = firn(project, "list-branches", "--json")
         heads = {b["name"]: b["head"] for b in json.loads(p.stdout)["branches"]}
@@ -586,7 +588,7 @@ class TestJourneySafety:
                     "id"
                 ]
             )
-        firn(project, "branch", "feature", ids[3][:10])
+        firn(project, "branch", "feature", ids[1][:10])  # c1: collapsed at keep 2
         firn(project, "switch", "feature")
         w(project, "f99.txt", "feature work\n")
         firn(project, "commit", "-m", "feature commit")

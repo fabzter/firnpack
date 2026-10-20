@@ -29,7 +29,7 @@ def project(tmp_path, monkeypatch):
 
 
 def _chain(repo, n=4):
-    """n sequential commits on main, returns layer ids newest-first."""
+    """n sequential commits on main, returns layer ids in commit order."""
     ids = []
     for i in range(n):
         write(repo.root, f"f{i}.txt", f"content {i}\n")
@@ -128,7 +128,7 @@ class TestRestore:
 
     def test_restore_no_drift_no_rescue(self, project):
         repo = Repo.init(project)
-        ids = _chain(repo, 3)  # newest-first: [c2, c1, c0]
+        ids = _chain(repo, 3)  # commit order: [c0, c1, c2]
         result = repo.restore(ids[1][:10])  # back to c1's tree (f0, f1)
         repo.close()
         assert result["rescue_layer"] is None
@@ -395,13 +395,14 @@ class TestCompactRefs:
     """
 
     def test_refuses_offchain_branch_ancestry(self, project):
-        """A branch cut from inside the range, then committed on: its
-        head is OUTSIDE collapsed but its parent is inside. The old
-        head-membership guard missed this and died on a raw
-        IntegrityError; the humane refusal must name the branch."""
+        """A branch cut from inside the COLLAPSED range, then committed
+        on: its head is outside collapsed but its parent is inside —
+        that history is genuinely squashed away, so the refusal names
+        the branch (the old head-membership guard missed this and died
+        on a raw IntegrityError)."""
         repo = Repo.init(project)
-        ids = _chain(repo, 5)  # ids[3] = c1, deep in the range
-        repo.branch("feature", ids[3][:10])
+        ids = _chain(repo, 5)  # commit order: ids[1] = c1, collapsed at keep 2
+        repo.branch("feature", ids[1][:10])
         repo.switch("feature")
         write(project, "f99.txt", "feature work\n")
         repo.commit("feature commit")
@@ -416,11 +417,17 @@ class TestCompactRefs:
 
     def test_remaps_branch_at_kept_head(self, project):
         """A branch sitting exactly at main's HEAD (an old kept id) is
-        repointed to the rewritten id — not refused, not dangling."""
+        repointed to the rewritten id — not refused, not dangling —
+        and the remap is reported, never silent."""
         repo = Repo.init(project)
-        _chain(repo, 4)
+        ids = _chain(repo, 4)
         repo.branch("feature")
+        plan = repo.compact(2, dry_run=True)
+        assert plan["branches_remapped"] == [{"name": "feature", "from": ids[3]}]
         result = repo.compact(2, yes=True)
+        assert result["branches_remapped"] == [
+            {"name": "feature", "from": ids[3], "to": result["new_head"]}
+        ]
         fh = repo._db.execute(
             "SELECT head FROM branches WHERE name = 'feature'"
         ).fetchone()[0]
@@ -530,7 +537,7 @@ class TestCompactRefs:
         amend orphans too."""
         repo = Repo.init(project)
         ids = _chain(repo, 3)
-        old_head = ids[0]
+        old_head = ids[2]  # the head amend replaces (commit order)
         repo.amend(message="c2 amended")
         result = repo.compact(1, yes=True)
         assert result["garbage_collected"] == 1
@@ -539,6 +546,106 @@ class TestCompactRefs:
         ).fetchone()[0]
         assert rows == 0
         assert not (project / ".firn" / "layers" / f"{old_head}.firn").exists()
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_rewrites_fork_on_kept_head(self, project):
+        """Owner item (a): a working branch forked from main's HEAD is
+        the common case — compact must not cliff on it. The fork layer
+        is rewritten onto the new head (same tree, message, author,
+        timestamps), the branch remaps, and the plan/result report it."""
+        repo = Repo.init(project)
+        _chain(repo, 5)
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "f99.txt", "feature work\n")
+        fork = repo.commit("feature commit")["layer_id"]
+        repo.switch("main")
+        plan = repo.compact(1, dry_run=True)
+        assert plan["off_chain_rewritten"] == 1
+        assert plan["branches_remapped"] == [{"name": "feature", "from": fork}]
+        result = repo.compact(1, yes=True)
+        assert result["off_chain_rewritten"] == 1
+        assert result["garbage_collected"] == 0  # forks rewrite, not collect
+        remap = result["branches_remapped"]
+        assert remap == [{"name": "feature", "from": fork, "to": remap[0]["to"]}]
+        fh = repo._db.execute(
+            "SELECT head FROM branches WHERE name = 'feature'"
+        ).fetchone()[0]
+        assert fh == remap[0]["to"]
+        parent = repo._db.execute(
+            "SELECT parent FROM layers WHERE id = ?", (fh,)
+        ).fetchone()[0]
+        assert parent == result["new_head"]  # sits on the rewritten head
+        # content survived the rewrite
+        _, manifest, _ = repo._read_layer(fh)
+        assert "f99.txt" in manifest
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_rewrites_stacked_forks_in_order(self, project):
+        """Stacked branches (branch2 on branch1's commit, both off the
+        kept chain) rewrite in topological order: branch2's new parent
+        is branch1's new head, and both remap."""
+        repo = Repo.init(project)
+        _chain(repo, 4)
+        repo.branch("one")
+        repo.switch("one")
+        write(project, "one.txt", "one work\n")  # clean commits no-op
+        b1 = repo.commit("one work")["layer_id"]
+        repo.branch("two")
+        repo.switch("two")
+        write(project, "two.txt", "two work\n")
+        b2 = repo.commit("two work")["layer_id"]
+        repo.switch("main")
+        result = repo.compact(1, yes=True)
+        assert result["off_chain_rewritten"] == 2
+        assert result["garbage_collected"] == 0  # forks rewrite, not collect
+        remapped = {b["name"]: b for b in result["branches_remapped"]}
+        assert set(remapped) == {"one", "two"}
+        assert remapped["one"]["from"] == b1
+        assert remapped["two"]["from"] == b2
+        two_head = repo._db.execute(
+            "SELECT head FROM branches WHERE name = 'two'"
+        ).fetchone()[0]
+        one_head = repo._db.execute(
+            "SELECT head FROM branches WHERE name = 'one'"
+        ).fetchone()[0]
+        parent = repo._db.execute(
+            "SELECT parent FROM layers WHERE id = ?", (two_head,)
+        ).fetchone()[0]
+        assert parent == one_head  # stacked parentage preserved
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_gcs_orphan_on_rewritten_fork(self, project):
+        """Amend on a fork: fork H1, commit H2 on it, amend H2 — the
+        replaced H2 is an unreachable row whose parent (H1) is itself
+        rewritten away. Compact rewrites H1 and the amended head, and
+        collects exactly the orphan: old H1 and old H2 rows and files
+        all vanish, nothing reachable is touched."""
+        repo = Repo.init(project)
+        _chain(repo, 4)
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "h1.txt", "fork one\n")
+        h1 = repo.commit("fork one")["layer_id"]
+        write(project, "h2.txt", "fork two\n")
+        h2 = repo.commit("fork two")["layer_id"]
+        repo.amend(message="fork two, amended")
+        repo.switch("main")
+        result = repo.compact(1, yes=True)
+        assert result["off_chain_rewritten"] == 2  # H1 + amended head
+        assert result["garbage_collected"] == 1  # the replaced H2 only
+        for gone in (h1, h2):
+            rows = repo._db.execute(
+                "SELECT count(*) FROM layers WHERE id = ?", (gone,)
+            ).fetchone()[0]
+            assert rows == 0
+            assert not (project / ".firn" / "layers" / f"{gone}.firn").exists()
         assert _fk_check(repo) == []
         assert repo.verify()["status"] == "ok"
         repo.close()

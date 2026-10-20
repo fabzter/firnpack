@@ -868,3 +868,23 @@ class TestWindowsCarryForward:
         assert mode in (0o644, 0o755), (
             f"symlink head entry donated its mode: {oct(mode)}"
         )
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="extension-derived exec bit is Windows CRT behavior",
+    )
+    def test_new_executable_extension_packs_exec_on_windows(self, project):
+        """Genuinely new paths (no head entry to carry from) take the
+        disk value: on Windows the CRT reports S_IEXEC from the file
+        extension, so a new .bat packs 0o755 (and stays executable when
+        restored on POSIX) while a new .txt packs 0o644 (SPEC §5, item
+        B note). Runs on the windows-latest CI legs."""
+        write(project, "run.bat", "echo hi\n")
+        write(project, "note.txt", "hi\n")
+        repo = Repo.init(project)
+        repo.commit("new files")
+        wt = repo._worktree()
+        _, manifest, _ = repo._read_layer(wt["head_id"])
+        repo.close()
+        assert manifest["run.bat"]["mode"] == 0o755
+        assert manifest["note.txt"]["mode"] == 0o644
