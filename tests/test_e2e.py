@@ -35,7 +35,9 @@ def firn(cwd, *args, check=True, input_text=None):
 def w(root: Path, rel: str, data: str):
     p = root / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(data, encoding="utf-8")
+    # bytes, not write_text: newline translation on Windows would corrupt
+    # every byte-exact assertion
+    p.write_bytes(data.encode("utf-8"))
     return p
 
 
@@ -137,9 +139,10 @@ class TestJourneyRecovery:
 
         dst = tmp_path / "dst"
         # copy project *including* .firn — the whole point of the design.
-        # NOTE: Path("src") / "." normalizes the slash-dot away, so we
-        # build the string ourselves (cp -R src dst would NEST, not copy).
-        subprocess.run(["cp", "-R", f"{src}/.", str(dst)], check=True)
+        # shutil, not `cp -R`: the Windows runners have no cp.
+        import shutil
+
+        shutil.copytree(src, dst)
         p = firn(dst, "status")
         assert "clean on main" in p.stdout
         p = firn(dst, "history")

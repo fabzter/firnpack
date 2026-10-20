@@ -365,6 +365,36 @@ def _hash_tree(
     return digest.hexdigest()[:ID_LEN]
 
 
+def _disk_exec_bit(st) -> bool:
+    """True when the file's execute bit is meaningfully set.
+
+    POSIX: st_mode & 0o100 (chmod drives it). Windows: there is no chmod
+    bit — the value is extension-derived and cannot be changed by the
+    user, so it participates in identity (same file -> same id) but never
+    drifts (SPEC 5 note; owner decision 1a, 2026-10-20).
+    """
+    return bool(st.st_mode & 0o100)
+
+
+_WINDOWS = os.name == "nt"
+
+
+def _file_mode(path, head_mode: int | None = None) -> int:
+    """Layer/cache mode for a regular file: 0o755/0o644.
+
+    Cross-platform policy (SPEC 5 note, 2026-10-20): on POSIX the exec bit
+    is real (chmod) and participates in identity. On Windows there is no
+    user-settable exec bit (os.chmod toggles read-only only), so:
+      - the disk value cannot drift (nothing can change it), and
+      - a layer written on another OS must not false-drift here: when the
+        head stores a mode, it is carried forward, keeping history stable
+        when a glacier moves between platforms.
+    """
+    if _WINDOWS and head_mode is not None:
+        return head_mode
+    return 0o755 if _disk_exec_bit(path.stat()) else 0o644
+
+
 def _layer_id(record: dict) -> str:
     """layer_id: sha256 over the canonical commit record (SPEC §5).
 
@@ -593,13 +623,9 @@ class Repo:
             fp = self.root / path
             st = fp.stat()
             data = fp.read_bytes()
-            exec_bit = bool(st.st_mode & 0o100)
-            entries[path] = (len(data), data, None, exec_bit)
-            stats[path] = [
-                st.st_size,
-                st.st_mtime_ns,
-                0o755 if exec_bit else 0o644,
-            ]
+            mode = _file_mode(fp, self._head_mode_for(path))
+            entries[path] = (len(data), data, None, mode == 0o755)
+            stats[path] = [st.st_size, st.st_mtime_ns, mode]
         for path in symlinks:
             fp = self.root / path
             target = os.readlink(fp)
@@ -607,6 +633,16 @@ class Repo:
             st = fp.lstat()
             stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
         return entries, stats
+
+    def _head_mode_for(self, path: str) -> int | None:
+        """Mode recorded for `path` in the head layer, if any (used for
+        the Windows carry-forward policy in _file_mode)."""
+        wt = self._worktree()
+        if not wt["head_id"]:
+            return None
+        _, manifest, _ = self._read_layer(wt["head_id"])
+        entry = manifest.get(path)
+        return entry.get("mode") if entry else None
 
     # -- layer I/O
 
@@ -636,14 +672,13 @@ class Repo:
             tar.addfile(ti, io.BytesIO(meta_bytes))
             for path in sorted(files, key=lambda p: p.encode("utf-8")):
                 fp = self.root / path
-                st = fp.stat()
                 data = fp.read_bytes()
                 ti = tarfile.TarInfo(path)
                 ti.size = len(data)
                 ti.mtime = 0
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = ""
-                ti.mode = 0o755 if st.st_mode & 0o111 else 0o644
+                ti.mode = _file_mode(fp, self._head_mode_for(path))
                 tar.addfile(ti, io.BytesIO(data))
             for path in sorted(symlinks, key=lambda p: p.encode("utf-8")):
                 target = os.readlink(self.root / path)
@@ -941,13 +976,14 @@ class Repo:
             except OSError:
                 continue
             cached = cache.get(path)
-            disk_mode = 0o755 if st.st_mode & 0o100 else 0o644
+            cached_mode = cached[2] if cached and len(cached) > 2 else None
+            disk_mode = _file_mode(fp, cached_mode)
             if (
                 cached
                 and not full
                 and cached[0] == st.st_size
                 and cached[1] == st.st_mtime_ns
-                and (len(cached) < 3 or cached[2] == disk_mode)
+                and (cached_mode is None or cached_mode == disk_mode)
             ):
                 clean.append(path)
                 continue
@@ -967,9 +1003,7 @@ class Repo:
                     modified.append(path)
                     continue
                 head_mode = entry.get("mode", 0o644)
-                disk_mode = (
-                    0o755 if (self.root / path).stat().st_mode & 0o100 else 0o644
-                )
+                disk_mode = _file_mode(self.root / path, head_mode)
                 if head_data.get(path) == new and head_mode == disk_mode:
                     clean.append(path)
                 else:
@@ -1327,6 +1361,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Windows pipes default to a legacy codepage (cp1252 etc.); a commit
+    # message like "añadido ✓" would crash the CLI *after* a successful
+    # pack. UTF-8 everywhere, best-effort (non-tty streams may not have
+    # reconfigure on exotic builds).
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

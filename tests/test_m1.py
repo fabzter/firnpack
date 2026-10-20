@@ -188,6 +188,7 @@ class TestCommit:
             )
         assert ids[0] == ids[1]
 
+    @pytest.mark.skipif(os.name == "nt", reason="no exec bit on Windows")
     def test_exec_bit_normalized(self, project):
         write(project, "run.sh", "echo hi\n", mode=0o755)
         write(project, "plain.txt", "x\n")
@@ -645,24 +646,88 @@ class TestOrphanSweep:
         assert (layers / f"{r1['layer_id']}.firn").is_file()
 
 
-class TestChangeMatrix:
-    """The anti-silent-drift family guard: every mutable attribute
-    firnpack tracks must produce drift -> pack -> new identity. If a new
-    tracked attribute is ever added without touching this matrix, the
-    matrix extension is the reminder (owner decision 1a, 2026-10-20)."""
+def _retarget(root: Path):
+    (root / "link.txt").unlink()
+    (root / "link.txt").symlink_to("a.txt")
 
+
+def _file_to_symlink(root: Path):
+    (root / "a.txt").unlink()
+    (root / "a.txt").symlink_to("other.txt")
+
+
+def _symlink_to_file(root: Path):
+    (root / "link.txt").unlink()
+    (root / "link.txt").write_bytes(b"was a link\n")
+
+
+def _delete(root: Path):
+    (root / "a.txt").unlink()
+
+
+def _add(root: Path):
+    (root / "added.txt").write_bytes(b"fresh\n")
+
+
+class TestChangeMatrix:
+    """The anti-silent-drift family guard: every mutation a user can make
+    must produce drift -> pack -> new identity. If a new tracked
+    attribute is ever added without extending this matrix, the matrix is
+    the reminder (owner decision 1a, 2026-10-20).
+
+    Rows: content, symlink retarget, file<->symlink swaps, delete, add.
+    Exec-bit is POSIX-only (Windows has no settable exec bit; nothing can
+    drift there by definition, and carry-forward keeps cross-platform
+    history stable).
+    """
+
+    POSIX_MUTATIONS = [
+        ("exec_bit", lambda root: (root / "a.txt").chmod(0o755)),
+    ]
     MUTATIONS = [
-        ("content", lambda p: p.write_bytes(p.read_bytes() + b"more\n")),
-        ("exec_bit", lambda p: p.chmod(0o755)),
+        (
+            "content",
+            lambda root: (root / "a.txt").write_bytes(b"start\nmore\n"),
+        ),
+        ("symlink_retarget", _retarget),
+        ("file_to_symlink", _file_to_symlink),
+        ("symlink_to_file", _symlink_to_file),
+        ("delete", _delete),
+        ("add", _add),
     ]
 
-    @pytest.mark.parametrize("name,mutate", MUTATIONS, ids=lambda v: v)
-    def test_mutation_never_silent(self, project, name, mutate):
+    def _baseline(self, project):
         write(project, "a.txt", "start\n")
+        write(project, "other.txt", "target\n")
+        (project / "link.txt").symlink_to("other.txt")
         repo = Repo.init(project)
         first = repo.commit("base")
         repo.close()
-        mutate(project / "a.txt")
+        return first
+
+    @pytest.mark.parametrize(
+        "name,mutate", MUTATIONS, ids=lambda v: v if isinstance(v, str) else ""
+    )
+    def test_mutation_never_silent(self, project, name, mutate):
+        first = self._baseline(project)
+        mutate(project)
+        repo = Repo.discover()
+        st = repo.status()
+        assert not st["clean"], f"{name} change was invisible: {st}"
+        st2 = repo.commit("after " + name)
+        repo.close()
+        assert st2["status"] == "packed", f"{name} change did not pack"
+        assert st2["layer_id"] != first["layer_id"], (
+            f"{name} change did not alter identity"
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="no settable exec bit")
+    @pytest.mark.parametrize(
+        "name,mutate", POSIX_MUTATIONS, ids=lambda v: v if isinstance(v, str) else ""
+    )
+    def test_posix_mutation_never_silent(self, project, name, mutate):
+        first = self._baseline(project)
+        mutate(project)
         repo = Repo.discover()
         st = repo.status()
         assert st["modified"] == ["a.txt"], f"{name} change was invisible"
@@ -673,6 +738,7 @@ class TestChangeMatrix:
             f"{name} change did not alter identity"
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="no settable exec bit")
     def test_chmod_round_trip(self, project):
         """chmod +x then commit: the layer stores 0o755, and a chmod back
         is again detectable (both directions)."""
