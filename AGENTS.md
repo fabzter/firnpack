@@ -158,12 +158,16 @@ firnpack/
 - [x] firnpack.py implementation — M1 + M2 complete: all 16 v1.0 commands
       (init, commit, status, history, diff, branch, switch, list-branches,
       rename-branch, delete-branch, merge, amend, restore, export, verify,
-      compact); 177 tests green (unit + property + e2e CLI), ruff clean
-- [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main and m2/branching;
-      release.yml (trusted publishing) in place, not yet fired
-- [ ] README upgrade + docs/ tree (SPEC §20) — next deliverable
-- [ ] PyPI publish (v1.0.0 tag → release.yml)
-- [ ] Skill repo (separate, git submodule link)
+      compact) plus `verify --rebuild-db`; 225 tests green (unit + property
+      + seeded fuzz + e2e CLI + docs/guard suites), ruff clean
+- [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main;
+      release.yml (trusted publishing) fired: **v1.0.0 on PyPI**
+      (2026-10-20; published artifact re-verified by clean install)
+- [x] README upgrade + docs/ tree (SPEC §20) — shipped with the
+      JSON-contract guard suite
+- [x] Skill repo — github.com/fabzter/agent-skills-firnpack (public):
+      SKILL.md + byte-match-guarded firnpack.py copy, submodule pinned
+      at v1.0.0, CI runs the engine suite against the copy
 
 ## 9. Working rules for agents in this repo
 
@@ -195,4 +199,5 @@ firnpack/
   forbidden, operation = permitted.
 
 Last updated: 2026-10-20 — drafted during the founding session; kept current
-through the spec review close (v0.13), the v0.14 amendments, and M2 completion.
+through the spec review close (v0.13), the v0.14 amendments, M2 completion,
+and the v1.0.0 release (PyPI live, skill repo published).
