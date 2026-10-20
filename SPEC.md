@@ -286,20 +286,28 @@ contains, in this order:
 
 **Two hashes** (this is the load-bearing detail)
 
-- **`tree_id`** = SHA-256 over the tree only — for each tracked path in sorted
-  order: `sha256(path bytes ∥ exec-bit ∥ file bytes)` — where exec-bit is a
-  single byte `0x01` if the source file's owner-exec bit is set, else `0x00`
-  (symlinks use `0x00`; their identity is the link target). Hashed again over
-  the concatenation. Truncated to 40 hex. *Ignores* message/author/time →
-  identical trees share a tree_id. Used by: `status` (worktree.snapshot),
-  merge (base/ours/theirs trees), and the nothing-to-pack check.
-  **Owner decision 2026-10-20 (1a)**: the exec bit participates in identity —
-  mode-only changes (chmod ±x) are detectable drift, never silent
-  divergence between disk and history. The stat cache stores the mode
-  alongside size/mtime so `status` flags a chmod cheaply; the file is then
-  re-packed with its new mode bit. No compatibility cost: firnpack has no
-  pre-1.0 layers outside test fixtures (fixed during the development
-  window).
+- **`tree_id`** = SHA-256 over the tree only — for each tracked path in
+  sorted order: `sha256(kind byte ∥ exec byte ∥ path bytes ∥ NUL ∥
+  data)`, hashed again over the concatenation. Truncated to 40 hex.
+  - kind byte: `0x66` (`f`) for regular files, `0x6c` (`l`) for symlinks
+    — a symlink's target bytes and a regular file's identical content
+    must never collide;
+  - exec byte: `0x01` if the source file's owner-exec bit is set, else
+    `0x00` (symlinks use `0x00`);
+  - NUL separator: paths cannot contain NUL bytes on POSIX or Windows,
+    so `path ∥ NUL ∥ data` is unambiguous — `{"a": b"bc"}` and
+    `{"ab": b"c"}` hashed identically without it (collision audit
+    2026-10-20).
+  *Ignores* message/author/time → identical trees share a tree_id. Used
+  by: `status` (worktree.snapshot), merge (base/ours/theirs trees), and
+  the nothing-to-pack check.
+  **Owner decision 2026-10-20 (1a)**: the exec bit participates in
+  identity — mode-only changes (chmod ±x) are detectable drift, never
+  silent divergence between disk and history. The stat cache stores the
+  mode alongside size/mtime so `status` flags a chmod cheaply; the file
+  is then re-packed with its new mode bit. No compatibility cost:
+  firnpack has no pre-1.0 layers outside test fixtures (fixed during the
+  development window).
 - **`layer_id`** = SHA-256 over a **canonical commit record** — a JSON object
   with sorted keys and a trailing newline containing exactly:
   `format_version`, `tree_id`, `parent`, `second_parent` (null), `message`,

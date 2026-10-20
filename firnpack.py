@@ -348,20 +348,27 @@ def _validate_member_types(members) -> None:
 def _hash_tree(
     entries: dict[str, tuple[int, bytes | None, str | None, bool]],
 ) -> str:
-    """tree_id: per-path sha256(path ∥ exec-bit ∥ content), then over the
-    concatenation (SPEC §5, owner decision 1a 2026-10-20).
+    """tree_id: per-path sha256(kind ∥ exec ∥ path ∥ NUL ∥ content), then
+    over the concatenation (SPEC §5, owner decision 1a 2026-10-20; kind
+    byte + NUL separator added 2026-10-20 after a collision audit).
 
     ``entries`` maps posix path -> (size, content_bytes, symlink_target,
-    exec_bit). Only one of content/target is set; symlinks hash their
-    target bytes and use exec_bit=False. Mode-only changes (chmod ±x)
-    therefore change tree_id — never silently invisible drift.
+    exec_bit). The kind byte disambiguates a symlink's target bytes from
+    a regular file's content; the NUL separator disambiguates the
+    path/content boundary ({"a": b"bc"} vs {"ab": b"c"} hashed identically
+    without it). Paths cannot contain NUL on POSIX or Windows, so the
+    separator is collision-proof. Mode-only changes (chmod ±x) still
+    change tree_id — never silently invisible drift.
     """
     digest = hashlib.sha256()
     for path in sorted(entries, key=lambda p: p.encode("utf-8")):
         _, content, target, exec_bit = entries[path]
         data = target.encode("utf-8") if content is None else content
-        prefix = b"\x01" if exec_bit else b"\x00"
-        digest.update(hashlib.sha256(prefix + path.encode("utf-8") + data).digest())
+        kind = b"f" if content is not None else b"l"
+        prefix = kind + (b"\x01" if exec_bit else b"\x00")
+        digest.update(
+            hashlib.sha256(prefix + path.encode("utf-8") + b"\x00" + data).digest()
+        )
     return digest.hexdigest()[:ID_LEN]
 
 

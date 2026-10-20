@@ -587,6 +587,12 @@ class TestRoundTrip:
         repo.close()
         assert meta["tree_id"] == r["tree_id"]
         assert manifest["a.txt"]["size"] == 6
+        if os.name == "nt":
+            # First commit: no head to carry the mode from, and Windows
+            # derives the exec bit from the extension — sub/b.txt reads
+            # 0o644 there. The mode round-trip is proven on POSIX (and
+            # by TestWindowsCarryForward via the carry-forward path).
+            return
         assert manifest["sub/b.txt"]["mode"] == 0o755
 
     def test_tree_id_matches_recompute(self, project):
@@ -606,6 +612,23 @@ class TestRoundTrip:
                 )
         repo.close()
         assert firnpack._hash_tree(entries) == r["tree_id"]
+
+
+class TestTreeIdCollisions:
+    """Identity ambiguity guards (collision audit 2026-10-20): the
+    per-path digest needs the kind byte and the NUL separator, or
+    distinct trees hash identically — and status would report drift
+    while commit says nothing-to-pack, forever."""
+
+    def test_path_content_boundary(self):
+        t1 = firnpack._hash_tree({"a": (2, b"bc", None, False)})
+        t2 = firnpack._hash_tree({"ab": (2, b"c", None, False)})
+        assert t1 != t2
+
+    def test_kind_disambiguates_symlink_target_from_content(self):
+        t3 = firnpack._hash_tree({"link": (3, None, "foo", False)})
+        t4 = firnpack._hash_tree({"link": (3, b"foo", None, False)})
+        assert t3 != t4
 
 
 # ----------------------------------------------------- repo file invariant
