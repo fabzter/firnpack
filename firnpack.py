@@ -1539,6 +1539,125 @@ class Repo:
             raise IntegrityError("verify failed:\n  " + "\n  ".join(problems))
         return {"status": "ok", "layers": len(rows)}
 
+    def rebuild_db(self) -> dict:
+        """Reconstruct the database from the in-band meta of every
+        layer file (SPEC 9.8/§13, Q9 owner-accept). Branch names and
+        pins live only in the database and are NOT recoverable: the
+        rebuild creates `main` at the newest tip layer (one no other
+        layer descends from; newest created_at, ties broken by id)
+        and reports what was lost.
+
+        Refuses (IntegrityError, exit 3) when a layer file fails its
+        self-hash or a referenced parent layer file is missing —
+        restore those files from an archive or backup first
+        (storage.md §6). An empty or table-less database file is
+        re-schematized in place; a database file sqlite cannot open
+        at all, or a missing one, must be replaced by an empty file
+        first (storage.md §6.4)."""
+        self._db.executescript(SCHEMA)  # idempotent: heals empty/corrupt-empty files
+        rows = []
+        for path in sorted(self.layers_dir.glob("*.firn")):
+            layer_id = path.stem
+            meta, manifest, _ = self._read_layer(layer_id)
+            record = {
+                "format_version": FORMAT_VERSION,
+                "tree_id": meta["tree_id"],
+                "parent": meta["parent"],
+                "second_parent": meta["second_parent"],
+                "message": meta["message"],
+                "author": meta["author"],
+                "created_at": meta["created_at"],
+            }
+            if _layer_id(record) != layer_id:
+                raise IntegrityError(
+                    f"layer {layer_id[:12]} fails its self-hash — restore "
+                    f"it from an archive or backup before rebuilding"
+                )
+            rows.append(
+                (
+                    layer_id,
+                    meta["tree_id"],
+                    meta["parent"],
+                    meta["second_parent"],
+                    meta["message"],
+                    meta["author"],
+                    meta["created_at"],
+                    meta.get("profile", "gzip"),
+                    len(manifest),
+                    path.stat().st_size,
+                )
+            )
+        ids = {r[0] for r in rows}
+        missing = sorted(
+            {p for r in rows for p in (r[2], r[3]) if p is not None and p not in ids}
+        )
+        if missing:
+            raise IntegrityError(
+                "cannot rebuild: parent layer file(s) missing: "
+                + ", ".join(m[:12] for m in missing)
+                + " — restore them first (storage.md §6)"
+            )
+        lost_branches: list[str] = []
+        with contextlib.suppress(sqlite3.Error):
+            # unreadable branches table: nothing to report as lost
+            lost_branches = [
+                n for (n,) in self._db.execute("SELECT name FROM branches")
+            ]
+        head_id = head_tree = None
+        if rows:
+            # newest TIP layer: one no other layer descends from.
+            # created_at is second-granular, so "newest created_at,
+            # ties by id" alone can pick a parent over its same-second
+            # child and orphan the true head; tip-preference recovers
+            # the latest work in that case and matches the ratified
+            # rule whenever timestamps differ (SPEC 13, Q9)
+            parents = {p for r in rows for p in (r[2], r[3]) if p is not None}
+            tips = [r for r in rows if r[0] not in parents]
+            newest = max(tips or rows, key=lambda r: (r[6], r[0]))
+            head_id, head_tree = newest[0], newest[1]
+        with self._db:
+            self._db.execute("PRAGMA defer_foreign_keys = ON")
+            self._db.execute("DELETE FROM layers")
+            self._db.execute("DELETE FROM branches")
+            for r in rows:
+                self._db.execute(
+                    "INSERT INTO layers (id, tree_id, parent, "
+                    "second_parent, message, author, created_at, profile, "
+                    "file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    r,
+                )
+            self._db.execute("DELETE FROM worktree")
+            if head_id is not None:
+                self._db.execute(
+                    "INSERT INTO branches (name, head, created_at) "
+                    "VALUES ('main', ?, ?)",
+                    (head_id, _utcnow()),
+                )
+                lost_branches = [b for b in lost_branches if b != "main"]
+                self._db.execute(
+                    "INSERT INTO worktree (id, head_kind, head_branch, "
+                    "head_pin, head_id, snapshot, stat_cache, "
+                    "merge_theirs, flattened_pending, updated_at) "
+                    "VALUES (1, 'branch', 'main', NULL, ?, ?, NULL, NULL, "
+                    "NULL, ?)",
+                    (head_id, head_tree, _utcnow()),
+                )
+            else:
+                self._db.execute(
+                    "INSERT INTO worktree (id, head_kind, head_branch, "
+                    "head_pin, head_id, snapshot, stat_cache, "
+                    "merge_theirs, flattened_pending, updated_at) "
+                    "VALUES (1, 'branch', 'main', NULL, NULL, NULL, NULL, "
+                    "NULL, NULL, ?)",
+                    (_utcnow(),),
+                )
+        return {
+            "status": "rebuilt",
+            "layers": len(rows),
+            "main_head": head_id,
+            "lost_branches": sorted(lost_branches),
+        }
+
     def compact(
         self,
         keep: int,
@@ -2627,6 +2746,26 @@ def _cmd_export(args) -> int:
 def _cmd_verify(args) -> int:
     repo = Repo.discover()
     try:
+        if args.rebuild_db:
+            rebuilt = repo.rebuild_db()
+            verify_result = repo.verify()
+            if args.json:
+                print(json.dumps({**rebuilt, "verify": verify_result}, indent=2))
+                return 0
+            head = rebuilt["main_head"]
+            print(
+                f"rebuilt database from {rebuilt['layers']} layer(s); "
+                f"main at {head[:12] if head else '(no layers)'}"
+            )
+            if rebuilt["lost_branches"]:
+                print(
+                    "lost (branch names live only in the database): "
+                    + ", ".join(rebuilt["lost_branches"])
+                )
+            print(
+                f"verify ok — {verify_result['layers']} layers re-hashed and consistent"
+            )
+            return 0
         result = repo.verify()
     finally:
         repo.close()
@@ -2949,6 +3088,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.set_defaults(func=_cmd_export)
 
     p_verify = sub.add_parser("verify", help="re-hash all layers; check DB consistency")
+    p_verify.add_argument(
+        "--rebuild-db",
+        action="store_true",
+        help="reconstruct the database from in-band layer meta first",
+    )
     p_verify.add_argument("--json", action="store_true")
     p_verify.set_defaults(func=_cmd_verify)
 

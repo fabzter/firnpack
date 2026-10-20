@@ -148,11 +148,18 @@ every collected layer count. Rationale: the v0.13 merge-base warning existed
 for visibility; removing it without reporting would break the repo-wide
 "never silent" discipline. Pointer: SPEC §9.9.
 
+## D-20 — `--rebuild-db` ships in v1.0 (2026-10-20, owner)
+
+Owner decision on O-01: ship the flag in v1.0 rather than defer.
+`verify --rebuild-db` reconstructs `layers` from in-band meta, recreates
+`main` at the newest tip layer (one no other layer descends from;
+newest `created_at`, ties by id — tip-preference refines the Q9
+tie-break so a same-second tie cannot orphan the true head), resets
+the worktree row, names every lost branch, and refuses on corrupt or
+parent-missing layers. Pointer: SPEC §9.8/§13, Q9; docs/storage.md §6.4.
+
 ## Open (not settled)
 
-- **O-01 — `--rebuild-db` (SPEC §9.8) specified, not shipped in v1.0.**
-  v1.0 recovery is `verify` + the manual re-import recipe in
-  `docs/storage.md` §6.4. Target: v1.x. Owner awareness recorded 2026-10-20.
 - **O-02 — tags** (refs table reserved), **per-path restore**, rename
   tracking: v1.x/v2 per SPEC §24.
 - **O-03 — cross-layer dedup**: v2 candidate, only if measured need appears.

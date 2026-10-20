@@ -761,3 +761,96 @@ class TestJsonContractShapes:
             "created_at",
             "current",
         }
+
+
+class TestJourneyRebuild:
+    """The recovery path (SPEC 9.8/13, Q9): the database is gone or
+    corrupt, the layers are intact, and `verify --rebuild-db`
+    reconstructs what is reconstructible — saying plainly what is
+    not."""
+
+    def _corrupt_db_empty(self, project):
+        (project / ".firn" / "glacier.db").write_bytes(b"")
+
+    def test_rebuild_after_total_db_loss(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "one\n")
+        firn(project, "commit", "-m", "c0")
+        w(project, "b.txt", "two\n")
+        firn(project, "commit", "-m", "c1")
+        # ratified rule as refined (SPEC 13, Q9, D-20): newest TIP
+        # layer (no other layer descends from it), newest created_at,
+        # ties by id — created_at is second-granular, so tip-
+        # preference is what recovers the true head on same-second
+        # commits; assert the rule, not an assumption
+        commits = json.loads(firn(project, "history", "--json").stdout)["commits"]
+        parents = {c["parent"] for c in commits} | {c["second_parent"] for c in commits}
+        tips = [c for c in commits if c["id"] not in parents]
+        expected = max(tips, key=lambda c: (c["created_at"], c["id"]))["id"]
+        self._corrupt_db_empty(project)
+        p = firn(project, "verify", "--rebuild-db")
+        assert "rebuilt database from 2 layer(s)" in p.stdout
+        assert "verify ok" in p.stdout
+        # synthetic main at the newest layer; worktree usable
+        p = firn(project, "list-branches", "--json")
+        branches = json.loads(p.stdout)["branches"]
+        assert [b["name"] for b in branches] == ["main"]
+        assert branches[0]["head"] == expected
+        p = firn(project, "history", "--json")
+        assert json.loads(p.stdout)["count"] == 2
+        p = firn(project, "status")
+        assert "clean on main" in p.stdout
+
+    def test_rebuild_names_the_lost_branches(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "one\n")
+        firn(project, "commit", "-m", "c0")
+        firn(project, "branch", "side")
+        firn(project, "branch", "other")
+        # readable database: the rebuild can name what it drops
+        p = firn(project, "verify", "--rebuild-db")
+        assert "lost" in p.stdout
+        assert "side" in p.stdout and "other" in p.stdout
+        p = firn(project, "list-branches", "--json")
+        assert [b["name"] for b in json.loads(p.stdout)["branches"]] == ["main"]
+
+    def test_rebuild_json_shape(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "one\n")
+        firn(project, "commit", "-m", "c0")
+        self._corrupt_db_empty(project)
+        out = json.loads(firn(project, "verify", "--rebuild-db", "--json").stdout)
+        assert set(out) == {"status", "layers", "main_head", "lost_branches", "verify"}
+        assert out["status"] == "rebuilt"
+        assert out["verify"] == {"status": "ok", "layers": 1}
+
+    def test_rebuild_refuses_corrupt_layer(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "one\n")
+        firn(project, "commit", "-m", "c0")
+        head = json.loads(firn(project, "history", "--json").stdout)["commits"][0]["id"]
+        (project / ".firn" / "layers" / f"{head}.firn").write_bytes(b"garbage")
+        p = firn(project, "verify", "--rebuild-db", check=False)
+        assert p.returncode == 3
+        assert "integrity failure" in p.stderr
+
+    def test_rebuild_refuses_missing_parent(self, project):
+        project.mkdir()
+        firn(project, "init")
+        ids = []
+        for i in range(3):
+            w(project, f"f{i}.txt", f"content {i}\n")
+            firn(project, "commit", "-m", f"c{i}")
+            ids.append(
+                json.loads(firn(project, "history", "--json").stdout)["commits"][0][
+                    "id"
+                ]
+            )
+        (project / ".firn" / "layers" / f"{ids[1]}.firn").unlink()
+        p = firn(project, "verify", "--rebuild-db", check=False)
+        assert p.returncode == 3
+        assert "parent layer file(s) missing" in p.stderr

@@ -96,7 +96,9 @@ with drift in the worktree it refuses instead.
 `firnpack verify` re-hashes every layer against its own filename, cross-checks
 the database, and reports dangling references or orphan files. It is the
 answer to "is my history still sound?" after a power cut, a disk scare, or a
-copy between machines.
+copy between machines. If the database itself is lost or corrupt,
+`verify --rebuild-db` reconstructs it from the layers themselves — and says
+plainly which branch names could not be recovered.
 
 ## History management: compact
 

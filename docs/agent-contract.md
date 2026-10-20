@@ -69,6 +69,10 @@ after them (rescue-layer additions excepted, and reported).
 7. **Pins are heads.** `switch <layer-id>` pins; commits while pinned advance
    the pin (no detached-HEAD failure mode). `status.head.kind` tells you
    which world you are in.
+8. **Recovery is explicit.** `verify --rebuild-db` is the only command
+   that reconstructs the database; it names every branch it drops and
+   refuses on corrupt or parent-missing layers. Report `lost_branches`
+   to the human; never present a rebuild as lossless.
 
 ## 5. JSON schemas (normative top level)
 
@@ -88,6 +92,8 @@ amend     {status: amended|nothing_to_amend, layer_id, replaced?}
 restore   {status: restored|exported, layer_id, rescue_layer?, to?}
 export    {status: exported, layer_id, to}
 verify    {status: ok, layers}            (failures exit 3, no JSON)
+          --rebuild-db → {status: rebuilt, layers, main_head,
+          lost_branches[], verify: {status, layers}}
 compact   plan      {status: plan, keep, layers_total, layers_dropped,
                      layers_rewritten, off_chain_rewritten,
                      layers_garbage_collected, branches_remapped:

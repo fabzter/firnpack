@@ -259,7 +259,7 @@ JSON: `{"status": "exported", "layer_id": "<40 hex>", "to": "<dir>"}`.
 ## verify
 
 ```
-firnpack verify [--json]
+firnpack verify [--rebuild-db] [--json]
 ```
 
 Re-hashes every layer against its filename, cross-checks in-band meta vs the
@@ -267,7 +267,21 @@ database, and checks for dangling parents/second-parents, dangling branch
 heads and worktree head, and orphan layer files. Any problem raises an
 integrity failure (exit 3) listing every problem.
 
-JSON (success only): `{"status": "ok", "layers": 12}`.
+`--rebuild-db` first reconstructs the database from the in-band meta of
+every layer file (SPEC §9.8/§13): branch names and pins live only in the
+database and are **not** recoverable — the rebuild creates `main` at the
+newest tip layer (one no other layer descends from; newest `created_at`,
+ties broken by id) and prints exactly which
+branch names were lost. It refuses (exit 3) when a layer file fails its
+self-hash or a referenced parent layer file is missing: restore those
+files first. An empty or table-less database file is re-schematized in
+place; if the file is missing entirely or unopenable, replace it with an
+empty file first (`storage.md` §6).
+
+JSON (verify alone, success only): `{"status": "ok", "layers": 12}`.
+JSON (`--rebuild-db`): `{"status": "rebuilt", "layers": N,
+"main_head": "<40 hex>|null", "lost_branches": ["side"], "verify":
+{"status": "ok", "layers": N}}`.
 
 ## compact
 

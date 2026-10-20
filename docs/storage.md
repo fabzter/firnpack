@@ -71,12 +71,12 @@ Members, in order:
    `flattened_paths` only when present.
 2. Every tracked path, lexicographic by POSIX path. Symlinks as tar symlinks
    (mode `0o777`); regular files `0o644`, or `0o755` when the exec bit is
-   set (on Windows: the CRT's extension-derived bit; existing entries carry
-   their stored mode forward — SPEC §5 item B).
+   set (on Windows: the CRT's extension-derived bit; existing entries
+   carry their stored mode forward — SPEC §5 item B).
 
-Canonical rules: mtime/uid/gid/uname/gname zeroed; no pax headers for paths
-≤ 100 chars (ustar prefix splitting, then a pax `path` record beyond);
-identity comes from content, never from clock or owner.
+Canonical rules: mtime/uid/gid/uname/gname zeroed; no pax headers for
+paths ≤ 100 chars (ustar prefix splitting, then a pax `path` record
+beyond); identity comes from content, never from clock or owner.
 
 Write path: `layers/<id>.firn.tmp` → fsync → atomic `os.replace`. A crash
 leaves an orphan `.tmp`/`.firn`, which the next mutating command sweeps;
@@ -119,14 +119,21 @@ mode is cached so `chmod ±x` shows as drift without a re-hash.
    can be dropped into `layers/` under its id; `verify` confirms it.
 3. **Orphan files**: swept automatically by the next `commit`/`amend`/
    `compact`; `verify` lists them first so nothing vanishes unobserved.
-4. **Lost or corrupt database**: layers are self-describing. Re-import
-   recipe (manual in v1.0): for each `layers/*.firn`, read
-   `__firnpack_meta__` and insert a `layers` row (id = filename;
-   `file_count` = tracked members; `size` = file size). Then recreate
-   `worktree` (init-equivalent) and point `main` at the layer with the
-   newest `created_at`. **Branch names and pins are not recoverable from
-   layers** — they exist only in the database; expect to re-create them by
-   hand. SPEC §9.8 specifies a `--rebuild-db` flag that automates this;
-   it is not shipped in v1.0 (see `decisions.md`).
+4. **Lost or corrupt database**: layers are self-describing.
+   `firnpack verify --rebuild-db` reconstructs the `layers` table from
+   each file's in-band `__firnpack_meta__` (id = filename; `file_count`
+   = tracked members; `size` = file size), recreates `main` at the
+   newest tip layer (one no other layer descends from; newest
+   `created_at`, ties broken by id), resets the
+   worktree row to that head, and prints exactly which branch names
+   were lost. **Branch names and pins are not recoverable from
+   layers** — they exist only in the database; re-create them by hand.
+   The rebuild refuses (exit 3) when a layer file fails its self-hash
+   or a referenced parent file is missing: restore those files from an
+   archive or backup first. An empty or table-less database file is
+   re-schematized in place; a missing or unopenable file must be
+   replaced with an empty file (`touch .firn/glacier.db`) before
+   rebuilding. `config` and the reserved `refs` table survive a
+   rebuild untouched.
 5. **Moving machines**: copy the project folder including `.firn/` — the
    repository is fully self-contained. `verify` on arrival.

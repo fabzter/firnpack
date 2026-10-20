@@ -123,7 +123,12 @@
 > `off_chain_rewritten`, CLI echo — never silent). §5 new-path mode
 > sentence corrected to the CRT extension-derived reality (a new
 > `.bat` packs `0o755` on Windows; windows-gated test added).
-> Changelog wording normalized (v0.2→v0.3 entry).
+> Changelog wording normalized (v0.2→v0.3 entry). Same-day follow-ups:
+> owner ships **`--rebuild-db` in v1.0** (O-01 closed as D-20; SPEC
+> §9.8/§13 implemented as `verify --rebuild-db` with loss notices and
+> corrupt/missing-parent refusals, e2e-covered); §22 suite budget
+> amended to **< 10 min** (owner: the 10 s line predated the e2e
+> journeys and the fuzz and "doesn't make a lot of sense").
 
 ---
 
@@ -977,8 +982,12 @@ machine, `--full` is cheap at small-project scale.
   file and no DB row — the repo is simply at its previous commit.
 - **Rebuild**: `verify --rebuild-db` reconstructs layers/refs from in-band
   meta. Branch names and pins are NOT recoverable from layers (they live only
-  in the DB). Rebuild creates `main` at the layer with the newest `created_at`
-  (ties broken by id), prints a notice about what was lost. (Q9: acceptable
+  in the DB). Rebuild creates `main` at the newest TIP layer — one no
+  other layer descends from — newest `created_at`, ties broken by id
+  (tip-preference: refinement of the Q9 tie-break recorded in D-20 —
+  second-granular timestamps make a raw created_at tie possible, and
+  a tie must not orphan the true head), prints a notice about what
+  was lost. (Q9: acceptable
   boundary?)
 - **Checksums everywhere**: filename = layer_id; in-band meta carries layer_id +
   tree_id; DB rows cross-checked against both.
@@ -1228,7 +1237,11 @@ commit/branch/merge sequences asserting invariants:
 - CLI integration via subprocess: exit codes + exact JSON shapes (contract
   tests).
 
-Suite must run < 10 s locally. No fixtures in wheels.
+Suite must run < 10 min locally (owner amendment 2026-10-20: the earlier
+10 s figure predated the e2e subprocess journeys and the seeded compact
+fuzz and no longer reflected reality — measured ~16 s / 210 tests on a
+2020s arm64 laptop; the CI matrix legs are the binding gate). No fixtures
+in wheels.
 
 ## 23. Performance targets (soft, unmeasured)
 
