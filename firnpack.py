@@ -349,8 +349,9 @@ def _hash_tree(
     entries: dict[str, tuple[int, bytes | None, str | None, bool]],
 ) -> str:
     """tree_id: per-path sha256(kind ∥ exec ∥ path ∥ NUL ∥ content), then
-    over the concatenation (SPEC §5, owner decision 1a 2026-10-20; kind
-    byte + NUL separator added 2026-10-20 after a collision audit).
+    over the concatenation (SPEC §5). Exec-in-identity: owner decision
+    1a (ratified 2026-10-20). Kind byte + NUL separator: collision
+    audit 2026-10-20 — PROPOSED, pending owner ratification (B2).
 
     ``entries`` maps posix path -> (size, content_bytes, symlink_target,
     exec_bit). The kind byte disambiguates a symlink's target bytes from
@@ -378,7 +379,9 @@ def _disk_exec_bit(st) -> bool:
     POSIX: st_mode & 0o100 (chmod drives it). Windows: there is no chmod
     bit — the value is extension-derived and cannot be changed by the
     user, so it participates in identity (same file -> same id) but never
-    drifts (SPEC 5 note; owner decision 1a, 2026-10-20).
+    drifts (exec-in-identity ratified as owner decision 1a, 2026-10-20;
+    the Windows carry-forward policy is separately PROPOSED, pending
+    ratification as item B).
     """
     return bool(st.st_mode & 0o100)
 
@@ -1006,17 +1009,17 @@ class Repo:
                 continue
             cached = cache.get(path)
             cached_mode = cached[2] if cached and len(cached) > 2 else None
+            if cached_mode not in (0o644, 0o755):
+                cached_mode = None
+                if path in head_manifest:
+                    suspect.append(path)
+                    continue
             # Stage 1 requires a regular-file cached mode: 0o777 is the
             # symlink sentinel, and legacy 2-element entries have no mode
             # at all. Either falling through to rehash is correct — a
             # same-size/same-mtime file replacing a cached symlink must
             # not pass the fast path (Windows carry-forward would return
             # the sentinel as the disk mode and report clean).
-            if cached_mode not in (0o644, 0o755):
-                cached_mode = None
-                if path in head_manifest:
-                    suspect.append(path)
-                    continue
             disk_mode = _file_mode(fp, cached_mode)
             if (
                 cached
