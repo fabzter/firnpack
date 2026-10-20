@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "firnpack"
-version = "0.1.0"
+version = "1.0.0"
 description = "a glacier for your files — every commit a single packed layer of history."
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,7 @@ dependencies = []
 authors = [{ name = "Fabrizio Hernandez" }]
 keywords = ["version control", "vcs", "backup", "single-user", "archive"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: OS Independent",

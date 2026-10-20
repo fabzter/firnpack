@@ -32,7 +32,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 FIRN_DIR = ".firn"
 META_MEMBER = "__firnpack_meta__"

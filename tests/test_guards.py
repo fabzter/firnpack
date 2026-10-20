@@ -71,3 +71,30 @@ class TestWorkflowGuards:
         ci = self._ci()
         assert "wheel-guard" in ci
         assert re.search(r"\bfirnpack\.py\b", ci)
+
+    def _release(self) -> str:
+        return (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_release_workflow_exists(self):
+        # SPEC 19: both workflow files exist (the guard that caught
+        # release.yml never having been committed)
+        assert (ROOT / ".github" / "workflows" / "release.yml").is_file()
+
+    def test_release_tag_trigger_and_trusted_publishing(self):
+        rel = self._release()
+        assert "v*" in rel  # tag-push trigger
+        assert "pypa/gh-action-pypi-publish@release/v1" in rel
+        assert "id-token: write" in rel  # OIDC, no API tokens
+        assert "contents: read" in rel
+
+    def test_release_builds_with_supported_python(self):
+        rel = self._release()
+        ci = self._ci()
+        # the release build runs a supported interpreter
+        versions = re.findall(r'python-version: "?([\d.]+)"?', rel)
+        assert versions, "release.yml must pin a build interpreter"
+        assert any(v in ci for v in versions), (
+            "release.yml builds on a Python the CI matrix never tests"
+        )
