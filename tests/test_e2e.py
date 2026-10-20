@@ -636,3 +636,128 @@ class TestJourneySafety:
         firn(project, "delete-branch", "feature")
         p = firn(project, "list-branches")
         assert "feature" not in p.stdout
+
+
+class TestJsonContractShapes:
+    """The top-level JSON key sets documented in agent-contract.md §5,
+    pinned at the CLI level: every documented shape is a test contract
+    (AGENTS.md §9), so the docs' claim is enforced, not asserted."""
+
+    def test_every_command_json_matches_the_contract(self, project):
+        project.mkdir()
+        firn(project, "init")
+
+        def j(*args):
+            return json.loads(firn(project, *args, "--json").stdout)
+
+        w(project, "a.txt", "one\n")
+        out = j("commit", "-m", "c0")
+        assert set(out) == {"status", "layer_id", "tree_id", "files", "size", "message"}
+        assert out["status"] == "packed"
+
+        out = j("status")
+        assert set(out) == {
+            "head",
+            "clean",
+            "modified",
+            "added",
+            "missing",
+            "ignored_count",
+            "ignored",
+            "nested_gitignore",
+            "merge_pending",
+            "flattened_pending",
+        }
+
+        out = j("history")
+        assert set(out) == {"commits", "count"}
+        assert set(out["commits"][0]) == {
+            "id",
+            "tree_id",
+            "parent",
+            "second_parent",
+            "message",
+            "author",
+            "created_at",
+            "tips",
+        }
+
+        out = j("diff")
+        assert set(out) == {"entries"}
+
+        out = j("branch", "side")
+        assert set(out) == {"name", "head", "created"}
+
+        out = j("switch", "side")
+        assert set(out) == {"ref", "kind", "head"}
+        w(project, "b.txt", "side\n")
+        firn(project, "commit", "-m", "side c")
+        out = j("switch", "main")
+        assert out["kind"] == "branch"
+
+        out = j("merge", "side")  # side is ahead -> fast-forward
+        assert out["status"] == "fast_forwarded"
+        assert set(out) == {"status", "head", "kind"}
+
+        w(project, "c.txt", "main\n")
+        out = j("commit", "-m", "c1")
+        assert set(out) <= {
+            "status",
+            "layer_id",
+            "tree_id",
+            "files",
+            "size",
+            "message",
+            "maxpath_warning",
+            "history_reminder",
+        }
+
+        out = j("amend", "-m", "c1 amended")
+        assert set(out) == {"status", "layer_id", "replaced"}
+
+        head = j("history")["commits"][0]["id"]
+        out = j("restore", head[:10])
+        assert set(out) == {"status", "layer_id", "rescue_layer"}
+
+        dest = project.parent / "exp"
+        out = j("export", head[:10], "--to", str(dest))
+        assert set(out) == {"status", "layer_id", "to"}
+
+        out = j("verify")
+        assert set(out) == {"status", "layers"}
+
+        # keep 2: side's head sits in the kept range -> remapped, so the
+        # branches_remapped arm of the shape is exercised too
+        out = j("compact", "--keep", "2", "--dry-run")
+        assert set(out) == {
+            "status",
+            "keep",
+            "layers_total",
+            "layers_dropped",
+            "layers_rewritten",
+            "off_chain_rewritten",
+            "layers_garbage_collected",
+            "branches_remapped",
+            "bytes_reclaimed",
+            "peak_disk_needed",
+        }
+        out = j("compact", "--keep", "2", "--yes")
+        assert set(out) == {
+            "status",
+            "kept",
+            "dropped",
+            "off_chain_rewritten",
+            "garbage_collected",
+            "branches_remapped",
+            "new_head",
+            "archive",
+        }
+
+        out = j("list-branches")
+        assert set(out) == {"branches"}
+        assert set(out["branches"][0]) == {
+            "name",
+            "head",
+            "created_at",
+            "current",
+        }

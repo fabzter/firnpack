@@ -11,6 +11,7 @@
 | [`../AGENTS.md`](../AGENTS.md) | repository context for contributors |
 
 All documents ship in the sdist. `usage.md` and `agent-contract.md` are two
-lenses on the same contract: usage carries per-command "for agents" callouts;
-agent-contract is the normative reference. Every JSON shape documented here
-is a test contract — the e2e suite pins them.
+lenses on the same contract: usage carries per-command operator callouts;
+agent-contract.md is the normative reference for automated operators.
+Every JSON shape documented here is a test contract — the e2e suite pins
+them (`TestJsonContractShapes`).

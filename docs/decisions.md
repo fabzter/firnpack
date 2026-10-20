@@ -99,15 +99,17 @@ formula had two collision classes (path/content boundary bleed;
 symlink-target vs file-content); regression tests pin both. Pointer:
 SPEC §5.
 
-## D-15 — No AI-collaboration attribution; one changelog phrase neutralized (2026-10-20, ratified, item C)
+## D-15 — Authorship-attribution ban; one changelog phrase neutralized (2026-10-20, ratified, item C)
 
-The repository's public face is human-authored work (AGENTS.md §9). Audit
-found exactly one attribution-adjacent phrase ("external advisory round",
-SPEC changelog v0.2→v0.3) — neutralized to "external review round". All
-other agent/LLM mentions are product-facing (G4 agent operability,
-git-compatible markers, agent-contract) and stay: they describe who
-*operates* the tool, which §9's exception protects. Pointer: AGENTS.md §9,
-SPEC header.
+The repository's public face is human-authored work (AGENTS.md §9): nothing
+may claim or imply machine authorship. Audit found exactly one
+attribution-adjacent phrase ("external advisory round", SPEC changelog
+v0.2→v0.3) — neutralized to "external review round". Operability mentions
+(the G4 goal, operator callouts in usage docs, git-compatible conflict
+markers, prior art in the machine-assisted niche) describe who *operates*
+the tool and stay — ratified as outside the ban's scope and recorded as
+such in AGENTS.md §9 (attribution = forbidden, operation = permitted).
+Pointer: AGENTS.md §9, SPEC header.
 
 ## D-16 — Reference-based compact guards (2026-10-20, ratified)
 
