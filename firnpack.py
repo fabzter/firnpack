@@ -617,13 +617,22 @@ class Repo:
         entries carry the exec bit so tree_id covers mode changes (1a);
         stats store the mode so the stat cache can flag a chmod without
         rehashing (stat fast-path compares [size, mtime, mode]).
+
+        The head manifest is loaded ONCE (Windows carry-forward needs it;
+        POSIX never does — the layer read is skipped entirely there).
         """
+        carry = None
+        if _WINDOWS:
+            wt = self._worktree()
+            if wt["head_id"]:
+                _, carry, _ = self._read_layer(wt["head_id"])
         entries, stats = {}, {}
         for path in files:
             fp = self.root / path
             st = fp.stat()
             data = fp.read_bytes()
-            mode = _file_mode(fp, self._head_mode_for(path))
+            head_mode = carry.get(path, {}).get("mode") if carry else None
+            mode = _file_mode(fp, head_mode)
             entries[path] = (len(data), data, None, mode == 0o755)
             stats[path] = [st.st_size, st.st_mtime_ns, mode]
         for path in symlinks:
@@ -633,16 +642,6 @@ class Repo:
             st = fp.lstat()
             stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
         return entries, stats
-
-    def _head_mode_for(self, path: str) -> int | None:
-        """Mode recorded for `path` in the head layer, if any (used for
-        the Windows carry-forward policy in _file_mode)."""
-        wt = self._worktree()
-        if not wt["head_id"]:
-            return None
-        _, manifest, _ = self._read_layer(wt["head_id"])
-        entry = manifest.get(path)
-        return entry.get("mode") if entry else None
 
     # -- layer I/O
 
@@ -656,6 +655,14 @@ class Repo:
         """
         tmp = self.layers_dir / f"{layer_id}.firn.tmp"
         meta_bytes = _canonical_json(meta)
+        # Windows carry-forward: load the head manifest ONCE (the caller
+        # passes paths fresh from _current_tree, whose stats already carry
+        # the resolved modes; on POSIX this read never happens).
+        carry = None
+        if _WINDOWS:
+            wt = self._worktree()
+            if wt["head_id"]:
+                _, carry, _ = self._read_layer(wt["head_id"])
         with (
             open(tmp, "wb") as raw,
             gzip.GzipFile(
@@ -678,7 +685,8 @@ class Repo:
                 ti.mtime = 0
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = ""
-                ti.mode = _file_mode(fp, self._head_mode_for(path))
+                head_mode = carry.get(path, {}).get("mode") if carry else None
+                ti.mode = _file_mode(fp, head_mode)
                 tar.addfile(ti, io.BytesIO(data))
             for path in sorted(symlinks, key=lambda p: p.encode("utf-8")):
                 target = os.readlink(self.root / path)

@@ -651,6 +651,11 @@ def _retarget(root: Path):
     (root / "link.txt").symlink_to("a.txt")
 
 
+def _retarget_dangling(root: Path):
+    (root / "link.txt").unlink()
+    (root / "link.txt").symlink_to("gone.txt")
+
+
 def _file_to_symlink(root: Path):
     (root / "a.txt").unlink()
     (root / "a.txt").symlink_to("other.txt")
@@ -690,6 +695,7 @@ class TestChangeMatrix:
             lambda root: (root / "a.txt").write_bytes(b"start\nmore\n"),
         ),
         ("symlink_retarget", _retarget),
+        ("symlink_retarget_dangling", _retarget_dangling),
         ("file_to_symlink", _file_to_symlink),
         ("symlink_to_file", _symlink_to_file),
         ("delete", _delete),
