@@ -423,11 +423,12 @@ def _merge3_text(path: str, base: str, ours: str, theirs: str) -> str | None:
     """Line-level 3-way merge of text. Returns merged text, or None when
     regions conflict (the caller writes marker blocks).
 
-    Regions where ours and theirs both changed *base* and the changes
-    overlap -> conflict. Non-overlapping changes apply cleanly.
+    Conflict rule (git's): two changes conflict when their base ranges
+    touch — insertions at the same index, or an insertion at the edge of
+    a replacement. Zero-length (pure insertion) ranges at index i touch
+    any change whose range contains i. Identical changes on both sides
+    are deduplicated, not applied twice.
     """
-    import difflib
-
     b_lines = base.splitlines(keepends=True)
     o_lines = ours.splitlines(keepends=True)
     t_lines = theirs.splitlines(keepends=True)
@@ -445,17 +446,38 @@ def _merge3_text(path: str, base: str, ours: str, theirs: str) -> str | None:
         if tag != "equal"
     ]
 
-    def overlaps(a, b):
+    def touches(a, b):
+        """Git-style adjacency: changes conflict if their base ranges
+        touch, INCLUDING pure insertions at the same point or at the
+        boundary of another change."""
+        # half-open [a0, a1) vs [b0, b1); insertions are zero-width
+        if a[0] == a[1] or b[0] == b[1]:
+            # zero-width range touches when its index lies within or
+            # on the boundary of the other
+            return a[0] <= b[1] and b[0] <= a[1]
         return a[0] < b[1] and b[0] < a[1]
 
     for oo in o_ops:
         for tto in t_ops:
-            if overlaps(oo, tto) and oo[2] != tto[2]:
+            if touches(oo, tto) and oo[2] != tto[2]:
                 return None  # conflicting region
-    # apply all changes onto base, in reverse index order
-    out = list(b_lines)
-    for i1, i2, replacement in sorted(o_ops + t_ops, key=lambda op: -op[0]):
-        out[i1:i2] = replacement
+    # dedupe: identical (span, content) changes on both sides apply once
+    seen = set()
+    ops = []
+    for op in o_ops + t_ops:
+        key = (op[0], op[1], tuple(op[2]))
+        if key in seen:
+            continue
+        seen.add(key)
+        ops.append(op)
+    # one forward sweep over base, consuming ops in index order
+    out = []
+    cursor = 0
+    for i1, i2, replacement in sorted(ops, key=lambda op: op[0]):
+        out.extend(b_lines[cursor:i1])
+        out.extend(replacement)
+        cursor = max(cursor, i2)
+    out.extend(b_lines[cursor:])
     return "".join(out)
 
 
@@ -1867,7 +1889,18 @@ def _cmd_merge(args) -> int:
         print(f"merged into layer {result['layer_id'][:12]}")
         return 0
     if status == "aborted":
-        print(f"merge aborted — back at {result['head'][:12]}")
+        rescue = result.get("rescue_layer")
+        line = f"merge aborted — back at {result['head'][:12]}"
+        if rescue:
+            # the rescue id is printed, not just stored: the layer is
+            # reachable only by id (no branch tip points at it), so
+            # this line is the user's map to their recovered work
+            line += (
+                f"\nyour uncommitted work was saved as layer "
+                f"{rescue[:12]} (restore it with: firnpack export "
+                f"{rescue[:12]} --to DIR)"
+            )
+        print(line)
         return 0
     if status == "conflict":
         print(

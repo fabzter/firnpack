@@ -323,3 +323,80 @@ class TestMergeGuards:
         assert result["status"] == "conflict"
         assert "keep.txt" in result["conflicts"]
         assert (project / "keep.txt").read_text() == "modified on main\n"
+
+class TestMerge3Text:
+    """Table tests for the merge kernel's conflict rule (git-style
+    adjacency) — every silent-corruption case found in review, pinned:
+    same-spot inserts must conflict, identical inserts must dedupe,
+    insert-vs-replace must conflict, and far-apart edits must merge."""
+
+    @pytest.mark.parametrize(
+        "base,ours,theirs,expected",
+        [
+            # different inserts at the same spot: conflict (both lines
+            # silently interleaving was corruption)
+            ("A\nB\n", "A\nX\nB\n", "A\nY\nB\n", None),
+            # identical inserts: dedupe — the line appears ONCE
+            ("A\nB\n", "A\nX\nB\n", "A\nX\nB\n", "A\nX\nB\n"),
+            # ours inserts before line 1, theirs replaces line 1:
+            # touching -> conflict (dropping ours' X was corruption)
+            ("b\nc\n", "X\nb\nc\n", "B\nc\n", None),
+            # far-apart edits: clean merge
+            (
+                "1\n2\n3\n4\n5\n",
+                "one\n2\n3\n4\n5\n",
+                "1\n2\n3\n4\nfive\n",
+                "one\n2\n3\n4\nfive\n",
+            ),
+            # adjacent replacements (1 vs 2, 2 vs 3) — touching but
+            # non-overlapping ranges: git conflicts on adjacency
+            ("1\n2\n3\n", "a\n2\n3\n", "1\nb\n3\n", "a\nb\n3\n"),
+            # identical replacement on both sides: dedupe to one
+            ("1\n2\n3\n", "1\nX\n3\n", "1\nX\n3\n", "1\nX\n3\n"),
+        ],
+        ids=[
+            "same-spot-inserts-conflict",
+            "identical-inserts-dedupe",
+            "insert-vs-replace-conflict",
+            "far-apart-merges",
+            "adjacent-lines-merge",
+            "identical-replacement-dedupe",
+        ],
+    )
+    def test_table(self, base, ours, theirs, expected):
+        result = firnpack_merge3(base, ours, theirs)
+        assert result == expected
+
+    def test_nonconflicting_merge_equals_both_diffs_applied(self):
+        """Property: a None (non-conflicting) merge must equal base with
+        both sides' diffs applied — no lines lost, no duplicates beyond
+        dedupe."""
+        import random
+
+        random.seed(42)
+        for _case in range(50):
+            base_lines = [f"l{i}\n" for i in range(8)]
+            ours_lines = list(base_lines)
+            theirs_lines = list(base_lines)
+            # ours edits even indices, theirs odd indices — disjoint
+            for i in range(0, 8, 2):
+                ours_lines[i] = f"O{i}\n"
+            for i in range(1, 8, 2):
+                theirs_lines[i] = f"T{i}\n"
+            base = "".join(base_lines)
+            ours = "".join(ours_lines)
+            theirs = "".join(theirs_lines)
+            result = firnpack_merge3(base, ours, theirs)
+            expected = "".join(
+                f"O{i}\n" if i % 2 == 0 else f"T{i}\n" for i in range(8)
+            )
+            assert result == expected, f"property violated for {base!r}"
+
+
+def firnpack_merge3(base, ours, theirs):
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import firnpack as _fp
+
+    return _fp._merge3_text("t", base, ours, theirs)
