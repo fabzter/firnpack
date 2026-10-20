@@ -321,7 +321,21 @@ class TestStatus:
         result = repo.status()
         repo.close()
         assert result["added"] == ["b.txt"]
+        assert result["modified"] == []  # added files are never also modified
         assert result["missing"] == ["a.txt"]
+
+    def test_new_symlink_is_added_not_modified(self, project):
+        """A brand-new symlink must appear in `added` only — the symlink
+        loop previously double-reported it as modified too."""
+        write(project, "real.txt", "data\n")
+        repo = Repo.init(project)
+        repo.commit("base")
+        (project / "link.txt").symlink_to("real.txt")
+        result = repo.status()
+        repo.close()
+        assert result["added"] == ["link.txt"]
+        assert result["modified"] == []
+        assert result["missing"] == []
 
     def test_empty_repo_status(self, project):
         repo = Repo.init(project)

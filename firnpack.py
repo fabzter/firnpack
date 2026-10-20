@@ -923,7 +923,7 @@ class Repo:
             ):
                 clean.append(path)
                 continue
-            if not cached:
+            if path not in head_manifest:
                 # never committed before: it's "added", not "modified"
                 continue
             suspect.append(path)
@@ -943,16 +943,22 @@ class Repo:
                     modified.append(path)
 
         for path in symlinks:
+            if path not in head_manifest:
+                # never committed before: "added", not "modified" (same
+                # guard as the regular-file loop above)
+                continue
             target = os.readlink(self.root / path)
-            old_target = head_manifest.get(path, {}).get("target")
+            old_target = head_manifest[path].get("target")
             if old_target == target:
                 clean.append(path)
             else:
                 modified.append(path)
 
         tracked = set(files) | set(symlinks)
-        added = sorted(tracked - set(cache))
-        missing = sorted(set(cache) - tracked - set(ignored))
+        # The head manifest is the committed truth; the stat cache is only
+        # an acceleration structure and may lag it after an edge-case crash.
+        added = sorted(tracked - set(head_manifest))
+        missing = sorted(set(head_manifest) - tracked - set(ignored))
 
         result = {
             "head": self._head_info(),
