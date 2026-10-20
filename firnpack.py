@@ -1105,6 +1105,141 @@ class Repo:
             info["branch"] = wt["head_branch"]
         return info
 
+    def _resolve_id(self, ref: str) -> str:
+        """Resolve a branch name or layer-id prefix to a full layer id."""
+        row = self._db.execute(
+            "SELECT head FROM branches WHERE name = ?", (ref,)
+        ).fetchone()
+        if row:
+            return row[0]
+        if len(ref) >= 6 and all(c in "0123456789abcdef" for c in ref):
+            matches = [
+                r[0]
+                for r in self._db.execute(
+                    "SELECT id FROM layers WHERE id LIKE ?", (ref + "%",)
+                )
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise FirnpackError(
+                    f"layer id prefix {ref!r} is ambiguous ({len(matches)} matches)"
+                )
+        raise FirnpackError(f"no branch or layer named {ref!r}")
+
+    def branch(self, name: str, from_ref: str | None = None) -> dict:
+        """Create a branch at HEAD (or at from_ref: branch name or id
+        prefix). Stays on the current branch (SPEC 9.4)."""
+        if not name or "/" in name or name.startswith("."):
+            raise FirnpackError(f"invalid branch name {name!r}")
+        existing = self._db.execute(
+            "SELECT 1 FROM branches WHERE name = ?", (name,)
+        ).fetchone()
+        if existing:
+            raise FirnpackError(f"branch {name!r} already exists")
+        wt = self._worktree()
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is pending — resolve and commit, or merge --abort"
+            )
+        if from_ref is not None:
+            head_id = self._resolve_id(from_ref)
+        elif wt["head_id"] is not None:
+            head_id = wt["head_id"]
+        else:
+            raise FirnpackError("empty repository: commit something before branching")
+        with self._db:
+            self._db.execute(
+                "INSERT INTO branches (name, head, created_at) VALUES (?, ?, ?)",
+                (name, head_id, _utcnow()),
+            )
+        return {"name": name, "head": head_id, "created": True}
+
+    def switch(self, ref: str) -> dict:
+        """Move the worktree to a branch or a pinned layer id.
+
+        Guards (SPEC 9.4): refuses on drift and while a merge is pending.
+        Committing while pinned advances the pin (no detached-HEAD shame).
+        """
+        wt = self._worktree()
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is pending — resolve and commit, or merge --abort "
+                "before switching"
+            )
+        if self.status()["clean"] is False:
+            raise DriftError(
+                "the working tree has drift — commit it (or restore) before switching"
+            )
+        row = self._db.execute(
+            "SELECT head FROM branches WHERE name = ?", (ref,)
+        ).fetchone()
+        with self._db:
+            if row:
+                layer_id = row[0]
+                self._db.execute(
+                    "UPDATE worktree SET head_kind = 'branch', "
+                    "head_branch = ?, head_pin = NULL, head_id = ?, "
+                    "updated_at = ? WHERE id = 1",
+                    (ref, layer_id, _utcnow()),
+                )
+                kind = "branch"
+            else:
+                layer_id = self._resolve_id(ref)
+                self._db.execute(
+                    "UPDATE worktree SET head_kind = 'pin', head_pin = ?, "
+                    "head_branch = NULL, head_id = ?, updated_at = ? "
+                    "WHERE id = 1",
+                    (layer_id, layer_id, _utcnow()),
+                )
+                kind = "pin"
+            self._sync_worktree_to(layer_id)
+        return {"ref": ref, "kind": kind, "head": layer_id}
+
+    def _sync_worktree_to(self, layer_id: str) -> None:
+        """Extract the layer's tree into the worktree and refresh the
+        snapshot/stat cache. M1 scope: files+symlinks replaced wholesale.
+        (The fulltree-replacement form of restore's safe extract.)"""
+        meta, manifest, _ = self._read_layer(layer_id)
+        _warn_patch_level_once()
+        # remove tracked files not in the target layer
+        cache = json.loads(self._worktree()["stat_cache"] or "{}")
+        for path in cache:
+            fp = self.root / path
+            if fp.is_symlink() or fp.is_file():
+                fp.unlink()
+        entries = {}
+        stats = {}
+        head_paths = [p for p, v in manifest.items()]
+        for path in head_paths:
+            v = manifest[path]
+            fp = self.root / path
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            if v["target"] is not None:
+                if fp.exists() or fp.is_symlink():
+                    fp.unlink()
+                fp.symlink_to(v["target"])
+                st = fp.lstat()
+                stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
+                entries[path] = (len(v["target"].encode()), None, v["target"], False)
+            else:
+                data = self._layer_contents(layer_id, {path})[path]
+                fp.write_bytes(data)
+                mode = v.get("mode", 0o644)
+                if mode == 0o755 and os.name != "nt":
+                    fp.chmod(0o755)
+                st = fp.stat()
+                exec_bit = mode == 0o755
+                entries[path] = (len(data), data, None, exec_bit)
+                stats[path] = [st.st_size, st.st_mtime_ns, mode]
+        tree_id = _hash_tree(entries)
+        with self._db:
+            self._db.execute(
+                "UPDATE worktree SET snapshot = ?, stat_cache = ?, "
+                "updated_at = ? WHERE id = 1",
+                (tree_id, json.dumps(stats), _utcnow()),
+            )
+
     def history(
         self,
         *,
@@ -1349,6 +1484,116 @@ def _cmd_diff(args) -> int:
     return 0
 
 
+def _cmd_branch(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.branch(args.name, args.from_ref)
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    print(f"branch {result['name']} created at {result['head'][:12]}")
+    print("(still on the current branch — switch when ready)")
+    return 0
+
+
+def _cmd_switch(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.switch(args.ref)
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    kind = "branch" if result["kind"] == "branch" else "pinned layer"
+    print(f"switched to {kind} {result['ref']} (head {result['head'][:12]})")
+    return 0
+
+
+def _cmd_list_branches(args) -> int:
+    repo = Repo.discover()
+    try:
+        rows = repo._db.execute(
+            "SELECT name, head, created_at FROM branches ORDER BY name"
+        ).fetchall()
+        wt = repo._worktree()
+    finally:
+        repo.close()
+    if args.json:
+        payload = {
+            "branches": [
+                {
+                    "name": n,
+                    "head": h,
+                    "created_at": c,
+                    "current": n == wt["head_branch"],
+                }
+                for n, h, c in rows
+            ]
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+    for name, head, _created in rows:
+        marker = "* " if name == wt["head_branch"] else "  "
+        print(f"{marker}{name:20s} {head[:12]}")
+    return 0
+
+
+def _cmd_rename_branch(args) -> int:
+    repo = Repo.discover()
+    try:
+        row = repo._db.execute(
+            "SELECT 1 FROM branches WHERE name = ?", (args.new,)
+        ).fetchone()
+        if row:
+            repo.close()
+            print(f"firnpack: branch {args.new!r} already exists", file=sys.stderr)
+            return 1
+        with repo._db:
+            repo._db.execute(
+                "UPDATE branches SET name = ? WHERE name = ?",
+                (args.new, args.old),
+            )
+            wt = repo._worktree()
+            if wt["head_branch"] == args.old:
+                repo._db.execute(
+                    "UPDATE worktree SET head_branch = ? WHERE id = 1",
+                    (args.new,),
+                )
+    finally:
+        repo.close()
+    print(f"renamed {args.old} -> {args.new}")
+    return 0
+
+
+def _cmd_delete_branch(args) -> int:
+    repo = Repo.discover()
+    try:
+        wt = repo._worktree()
+        if wt["head_kind"] == "branch" and wt["head_branch"] == args.name:
+            repo.close()
+            print(
+                f"firnpack: cannot delete the branch you are on ({args.name!r})",
+                file=sys.stderr,
+            )
+            return 1
+        row = repo._db.execute(
+            "SELECT head FROM branches WHERE name = ?", (args.name,)
+        ).fetchone()
+        if not row:
+            repo.close()
+            print(f"firnpack: no branch named {args.name!r}", file=sys.stderr)
+            return 1
+        with repo._db:
+            repo._db.execute("DELETE FROM branches WHERE name = ?", (args.name,))
+    finally:
+        repo.close()
+    print(f"deleted branch {args.name} (layers remain on disk)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="firnpack",
@@ -1399,6 +1644,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff = sub.add_parser("diff", help="working tree vs head layer")
     p_diff.add_argument("--json", action="store_true")
     p_diff.set_defaults(func=_cmd_diff)
+
+    p_branch = sub.add_parser("branch", help="create a branch")
+    p_branch.add_argument("name")
+    p_branch.add_argument("from_ref", nargs="?", default=None)
+    p_branch.add_argument("--json", action="store_true")
+    p_branch.set_defaults(func=_cmd_branch)
+
+    p_switch = sub.add_parser("switch", help="move to a branch or layer id")
+    p_switch.add_argument("ref")
+    p_switch.add_argument("--json", action="store_true")
+    p_switch.set_defaults(func=_cmd_switch)
+
+    p_list = sub.add_parser("list-branches", help="branches and their heads")
+    p_list.add_argument("--json", action="store_true")
+    p_list.set_defaults(func=_cmd_list_branches)
+
+    p_rename = sub.add_parser("rename-branch", help="rename a branch")
+    p_rename.add_argument("old")
+    p_rename.add_argument("new")
+    p_rename.set_defaults(func=_cmd_rename_branch)
+
+    p_delete = sub.add_parser(
+        "delete-branch", help="delete a branch (warns if heads orphan)"
+    )
+    p_delete.add_argument("name")
+    p_delete.set_defaults(func=_cmd_delete_branch)
 
     return parser
 
