@@ -419,6 +419,55 @@ def _carry_mode(carry: dict | None, path: str) -> int | None:
     return entry.get("mode")
 
 
+def _merge3_text(path: str, base: str, ours: str, theirs: str) -> str | None:
+    """Line-level 3-way merge of text. Returns merged text, or None when
+    regions conflict (the caller writes marker blocks).
+
+    Regions where ours and theirs both changed *base* and the changes
+    overlap -> conflict. Non-overlapping changes apply cleanly.
+    """
+    import difflib
+
+    b_lines = base.splitlines(keepends=True)
+    o_lines = ours.splitlines(keepends=True)
+    t_lines = theirs.splitlines(keepends=True)
+
+    matcher_o = difflib.SequenceMatcher(None, b_lines, o_lines)
+    matcher_t = difflib.SequenceMatcher(None, b_lines, t_lines)
+    o_ops = [
+        (i1, i2, o_lines[j1:j2])
+        for tag, i1, i2, j1, j2 in matcher_o.get_opcodes()
+        if tag != "equal"
+    ]
+    t_ops = [
+        (i1, i2, t_lines[j1:j2])
+        for tag, i1, i2, j1, j2 in matcher_t.get_opcodes()
+        if tag != "equal"
+    ]
+
+    def overlaps(a, b):
+        return a[0] < b[1] and b[0] < a[1]
+
+    for oo in o_ops:
+        for tto in t_ops:
+            if overlaps(oo, tto) and oo[2] != tto[2]:
+                return None  # conflicting region
+    # apply all changes onto base, in reverse index order
+    out = list(b_lines)
+    for i1, i2, replacement in sorted(o_ops + t_ops, key=lambda op: -op[0]):
+        out[i1:i2] = replacement
+    return "".join(out)
+
+
+def _marker_block(base: str, ours: str, theirs: str) -> bytes:
+    """Git-compatible conflict markers (SPEC §11) — deliberately the
+    standard shape so any resolver already knows it."""
+    o_text = "".join(ours.splitlines(keepends=True))
+    t_text = "".join(theirs.splitlines(keepends=True))
+    block = "<<<<<<< ours\n" + o_text + "=======\n" + t_text + ">>>>>>> theirs\n"
+    return block.encode("utf-8")
+
+
 def _layer_id(record: dict) -> str:
     """layer_id: sha256 over the canonical commit record (SPEC §5).
 
@@ -787,6 +836,296 @@ class Repo:
                 if m.name in wanted and m.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                     out[m.name] = tar.extractfile(m).read()
         return out
+
+    # -- merge machinery (SPEC §10/§11)
+
+    def _ancestors(self, layer_id: str) -> set[str]:
+        seen = set()
+        stack = [layer_id]
+        while stack:
+            lid = stack.pop()
+            if lid is None or lid in seen:
+                continue
+            seen.add(lid)
+            row = self._db.execute(
+                "SELECT parent, second_parent FROM layers WHERE id = ?",
+                (lid,),
+            ).fetchone()
+            if row:
+                stack.extend(row)
+        return seen
+
+    def _lca(self, ours: str, theirs: str) -> str | None:
+        ours_set = self._ancestors(ours)
+        stack = [theirs]
+        seen = set()
+        # walk theirs upward; first node also in ours_set wins — BFS-ish
+        # via ordered expansion, good enough for small DAGs
+        while stack:
+            lid = stack.pop(0)
+            if lid is None or lid in seen:
+                continue
+            seen.add(lid)
+            if lid in ours_set:
+                return lid
+            row = self._db.execute(
+                "SELECT parent, second_parent FROM layers WHERE id = ?",
+                (lid,),
+            ).fetchone()
+            if row:
+                stack.extend(row)
+        return None
+
+    def _merge_trees(self, base, ours, theirs):
+        """3-way merge at tree level. Returns (merged, conflicts) where
+        merged maps path -> (data_bytes, target_str_or_None, exec_bit)
+        and conflicts is a list of paths."""
+        all_paths = sorted(set(base) | set(ours) | set(theirs))
+        merged, conflicts = {}, []
+        for path in all_paths:
+            b = base.get(path)
+            o = ours.get(path)
+            t = theirs.get(path)
+            if o == t:  # same on both sides (including both absent)
+                if o is not None:
+                    merged[path] = o
+                continue
+            if b == o:  # only theirs changed
+                if t is not None:
+                    merged[path] = t
+                continue
+            if b == t:  # only ours changed
+                if o is not None:
+                    merged[path] = o
+                continue
+            # both changed differently
+            if o is None or t is None:
+                # delete/modify: keep the modified side, report conflict
+                # (owner decision Q7)
+                survivor = o if o is not None else t
+                if survivor is not None:
+                    merged[path] = survivor
+                conflicts.append(path)
+                continue
+            if o[1] is not None or t[1] is not None or b and b[1] is not None:
+                # any symlink involved: no line merge, conflict
+                conflicts.append(path)
+                merged[path] = o
+                continue
+            # text merge: line-level 3-way with markers
+            b_text = (b[0] if b else b"").decode("utf-8", "replace")
+            o_text = o[0].decode("utf-8", "replace")
+            t_text = t[0].decode("utf-8", "replace")
+            if b"\x00" in o[0] or b"\x00" in t[0]:
+                # binary: no auto-merge, conflict
+                conflicts.append(path)
+                merged[path] = o
+                continue
+            result = _merge3_text(path, b_text, o_text, t_text)
+            if result is None:
+                conflicts.append(path)
+                merged[path] = (
+                    _marker_block(b_text, o_text, t_text),
+                    None,
+                    o[2],
+                )
+            else:
+                merged[path] = (result.encode("utf-8"), None, o[2])
+        return merged, conflicts
+
+    def merge(self, ref: str, message: str | None = None) -> dict:
+        """3-way merge of a branch into the current head (SPEC §10).
+
+        Clean merge -> one merge layer (parent = ours, second_parent =
+        theirs). Conflicts -> pending-merge state (merge_theirs), markers
+        in the worktree, exit path is resolve-then-commit or --abort.
+        """
+        wt = self._worktree()
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is already pending — resolve it first "
+                "(commit or merge --abort)"
+            )
+        # Step 0: drift guard (SPEC §10)
+        st = self.status()
+        if not st["clean"]:
+            raise DriftError("the working tree has drift — commit it before merging")
+        theirs_id = self._resolve_id(ref)
+        ours_id = wt["head_id"]
+        if theirs_id == ours_id:
+            return {"status": "already_up_to_date", "head": ours_id}
+        base_id = self._lca(ours_id, theirs_id)
+        if base_id == theirs_id:
+            return {"status": "already_up_to_date", "head": ours_id}
+        if base_id == ours_id:
+            # fast-forward (SPEC §10 step 3): move the CURRENT branch's
+            # head to theirs (or advance the pin), then sync the
+            # worktree. One transaction, no switch — switch would move
+            # the worktree pointer but never touch branches.head.
+            with self._db:
+                if wt["head_kind"] == "branch":
+                    self._db.execute(
+                        "UPDATE branches SET head = ? WHERE name = ?",
+                        (theirs_id, wt["head_branch"]),
+                    )
+                self._db.execute(
+                    "UPDATE worktree SET head_id = ?, head_pin = ?, "
+                    "updated_at = ? WHERE id = 1",
+                    (theirs_id, theirs_id, _utcnow()),
+                )
+            self._sync_worktree_to(theirs_id)
+            return {
+                "status": "fast_forwarded",
+                "head": theirs_id,
+                "kind": wt["head_kind"],
+            }
+
+        # load the three trees
+        def tree_of(layer_id):
+            _, manifest, _ = self._read_layer(layer_id)
+            data = self._layer_contents(layer_id, set(manifest))
+            tree = {}
+            for path, v in manifest.items():
+                if v["target"] is not None:
+                    tree[path] = (None, v["target"], False)
+                else:
+                    tree[path] = (data.get(path, b""), None, v.get("mode") == 0o755)
+            return tree
+
+        base_tree = tree_of(base_id)
+        ours_tree = tree_of(ours_id)
+        theirs_tree = tree_of(theirs_id)
+        merged, conflicts = self._merge_trees(base_tree, ours_tree, theirs_tree)
+
+        if not conflicts:
+            # DB-first (the v0.4 ratified ordering, identical to the
+            # conflict path): set pending state BEFORE materializing, so
+            # a crash mid-materialize leaves a coherent pending merge —
+            # recoverable via --abort — instead of merged files with no
+            # state and an old snapshot (where the next commit would
+            # silently drop theirs from the DAG).
+            with self._db:
+                self._db.execute(
+                    "UPDATE worktree SET merge_theirs = ? WHERE id = 1",
+                    (theirs_id,),
+                )
+            self._materialize(merged)
+            msg = message or f"merge {ref}"
+            result = self.commit(msg)
+            return {
+                "status": "merged",
+                "layer_id": result.get("layer_id"),
+                "conflicts": [],
+            }
+
+        # conflict path: DB-first pending state, then markers to disk
+        # (SPEC §10 step 6 — crash ordering ratified v0.4)
+        with self._db:
+            self._db.execute(
+                "UPDATE worktree SET merge_theirs = ? WHERE id = 1",
+                (theirs_id,),
+            )
+        self._materialize(merged)  # markers included
+        return {
+            "status": "conflict",
+            "head": ours_id,
+            "theirs": theirs_id,
+            "conflicts": conflicts,
+        }
+
+    def merge_abort(self) -> dict:
+        """Abort a pending merge: rescue any drift (SPEC 9.7 — including
+        half-finished conflict resolutions), restore the head layer to
+        the worktree, clear pending state — all without routing the
+        rescue through commit() (which would consume merge_theirs as a
+        second parent or block on markers)."""
+        wt = self._worktree()
+        if wt["merge_theirs"] is None:
+            raise FirnpackError("no merge is pending")
+        ours_id = wt["head_id"]
+
+        # Rescue layer: tree = current worktree, parent = head, no
+        # second parent, distinctive auto message. Written directly, NOT
+        # via commit() — merge_theirs is still set.
+        files, symlinks, _ignored, _nested = self._walk()
+        entries, _stats = self._current_tree(files, symlinks)
+        tree_id = _hash_tree(entries)
+        rescue_written = False
+        if tree_id != wt["snapshot"]:
+            record = {
+                "format_version": FORMAT_VERSION,
+                "tree_id": tree_id,
+                "parent": ours_id,
+                "second_parent": None,
+                "message": "auto: drift rescue before merge --abort",
+                "author": self.author,
+                "created_at": _utcnow(),
+            }
+            rescue_id = _layer_id(record)
+            meta = dict(record)
+            meta["layer_id"] = rescue_id
+            meta["profile"] = "gzip"
+            size = self._write_layer(rescue_id, meta, files, symlinks)
+            with self._db:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO layers (id, tree_id, parent, "
+                    "second_parent, message, author, created_at, profile,"
+                    " file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        rescue_id,
+                        tree_id,
+                        ours_id,
+                        None,
+                        record["message"],
+                        self.author,
+                        record["created_at"],
+                        "gzip",
+                        len(files) + len(symlinks),
+                        size,
+                    ),
+                )
+            rescue_written = True
+
+        self._sync_worktree_to(ours_id)
+        with self._db:
+            self._db.execute("UPDATE worktree SET merge_theirs = NULL WHERE id = 1")
+        return {
+            "status": "aborted",
+            "head": ours_id,
+            "rescue_layer": rescue_id if rescue_written else None,
+        }
+
+    def _materialize(self, tree: dict) -> None:
+        """Write a merged tree into the worktree (markers included),
+        then refresh the stat cache so status reports drift correctly."""
+        cache = json.loads(self._worktree()["stat_cache"] or "{}")
+        for path in cache:
+            fp = self.root / path
+            if fp.is_symlink() or fp.is_file():
+                fp.unlink()
+        stats = {}
+        for path in sorted(tree):
+            data, target, exec_bit = tree[path]
+            fp = self.root / path
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            if target is not None:
+                if fp.exists() or fp.is_symlink():
+                    fp.unlink()
+                fp.symlink_to(target)
+                st = fp.lstat()
+                stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
+            else:
+                fp.write_bytes(data)
+                mode = 0o755 if exec_bit else 0o644
+                if exec_bit and os.name != "nt":
+                    fp.chmod(0o755)
+                st = fp.stat()
+                stats[path] = [st.st_size, st.st_mtime_ns, mode]
+        with self._db:
+            self._db.execute(
+                "UPDATE worktree SET stat_cache = ?, updated_at = ? WHERE id = 1",
+                (json.dumps(stats), _utcnow()),
+            )
 
     # -- commands
 
@@ -1199,10 +1538,16 @@ class Repo:
     def _sync_worktree_to(self, layer_id: str) -> None:
         """Extract the layer's tree into the worktree and refresh the
         snapshot/stat cache. M1 scope: files+symlinks replaced wholesale.
-        (The fulltree-replacement form of restore's safe extract.)"""
+
+        All layer content is read in ONE pass BEFORE any worktree
+        mutation (validation included): a corrupt member aborts the
+        switch with the worktree untouched — never half-deleted.
+        """
         meta, manifest, _ = self._read_layer(layer_id)
         _warn_patch_level_once()
-        # remove tracked files not in the target layer
+        regular_paths = {p for p, v in manifest.items() if v["target"] is None}
+        contents = self._layer_contents(layer_id, regular_paths)
+
         cache = json.loads(self._worktree()["stat_cache"] or "{}")
         for path in cache:
             fp = self.root / path
@@ -1210,8 +1555,7 @@ class Repo:
                 fp.unlink()
         entries = {}
         stats = {}
-        head_paths = [p for p, v in manifest.items()]
-        for path in head_paths:
+        for path in sorted(manifest):
             v = manifest[path]
             fp = self.root / path
             fp.parent.mkdir(parents=True, exist_ok=True)
@@ -1221,9 +1565,14 @@ class Repo:
                 fp.symlink_to(v["target"])
                 st = fp.lstat()
                 stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
-                entries[path] = (len(v["target"].encode()), None, v["target"], False)
+                entries[path] = (
+                    len(v["target"].encode()),
+                    None,
+                    v["target"],
+                    False,
+                )
             else:
-                data = self._layer_contents(layer_id, {path})[path]
+                data = contents[path]
                 fp.write_bytes(data)
                 mode = v.get("mode", 0o644)
                 if mode == 0o755 and os.name != "nt":
@@ -1461,7 +1810,6 @@ def _cmd_history(args) -> int:
             f"{' ' + tips if tips else ''}{merge}"
         )
         print(f"    {c['message']}")
-    return 0
 
 
 def _cmd_diff(args) -> int:
@@ -1481,6 +1829,60 @@ def _cmd_diff(args) -> int:
             )
         else:
             print(entry["hunks"], end="")
+    return 0
+
+
+def _cmd_merge(args) -> int:
+    repo = Repo.discover()
+    try:
+        if args.abort:
+            result = repo.merge_abort()
+        elif args.ref is None:
+            print(
+                "firnpack: merge needs a branch name (or --abort)",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            result = repo.merge(args.ref, args.message)
+    except MergeConflict:
+        # merge() reports conflicts in its result dict, not via the
+        # exception — this except is defensive only
+        raise
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        if result["status"] == "conflict":
+            return 1
+        return 0
+    status = result["status"]
+    if status == "already_up_to_date":
+        print(f"already up to date (head {result['head'][:12]})")
+        return 0
+    if status == "fast_forwarded":
+        print(f"fast-forwarded to {result['head'][:12]}")
+        return 0
+    if status == "merged":
+        print(f"merged into layer {result['layer_id'][:12]}")
+        return 0
+    if status == "aborted":
+        print(f"merge aborted — back at {result['head'][:12]}")
+        return 0
+    if status == "conflict":
+        print(
+            f"merge conflict in {len(result['conflicts'])} file(s):",
+            file=sys.stderr,
+        )
+        for path in result["conflicts"]:
+            print(f"  {path}", file=sys.stderr)
+        print(
+            "fix the marked files (<<<<<<< ... >>>>>>>), then commit. "
+            "Or: firnpack merge --abort",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"merge: {status}")
     return 0
 
 
@@ -1644,6 +2046,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff = sub.add_parser("diff", help="working tree vs head layer")
     p_diff.add_argument("--json", action="store_true")
     p_diff.set_defaults(func=_cmd_diff)
+
+    p_merge = sub.add_parser("merge", help="merge a branch into HEAD")
+    p_merge.add_argument("ref", nargs="?", default=None)
+    p_merge.add_argument("-m", "--message", default=None)
+    p_merge.add_argument("--abort", action="store_true", help="abort a pending merge")
+    p_merge.add_argument("--json", action="store_true")
+    p_merge.set_defaults(func=_cmd_merge)
 
     p_branch = sub.add_parser("branch", help="create a branch")
     p_branch.add_argument("name")
