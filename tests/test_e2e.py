@@ -391,3 +391,123 @@ class TestJourneyUnicode:
         assert "packed 2 files" in p.stdout
         p = firn(project, "status")
         assert "clean on main" in p.stdout
+
+
+class TestJourneyMerge:
+    """The full merge journey through the CLI, exactly as a user (or a
+    skill) drives it: exit codes, human output, JSON contracts."""
+
+    def test_clean_merge_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "shared.txt", "line1\nline2\nline3\n")
+        firn(project, "commit", "-m", "base")
+        firn(project, "branch", "side")
+        firn(project, "switch", "side")
+        w(project, "side.txt", "side work\n")
+        w(project, "shared.txt", "line1\nside-change\nline3\n")
+        firn(project, "commit", "-m", "side work")
+        firn(project, "switch", "main")
+        w(project, "main.txt", "main work\n")
+        firn(project, "commit", "-m", "main work")
+        p = firn(project, "merge", "side")
+        assert p.returncode == 0
+        assert "merged into layer" in p.stdout
+        # both sides present after the merge
+        assert (project / "side.txt").exists()
+        assert (project / "main.txt").exists()
+        # status is clean on the merged tree
+        p = firn(project, "status")
+        assert "clean on main" in p.stdout
+        # the merge layer shows in history with the merge shape
+        p = firn(project, "history", "--json")
+        payload = json.loads(p.stdout)
+        top = payload["commits"][0]
+        assert top["second_parent"] is not None
+
+    def test_conflict_merge_journey_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "shared.txt", "base\n")
+        firn(project, "commit", "-m", "base")
+        firn(project, "branch", "side")
+        firn(project, "switch", "side")
+        w(project, "shared.txt", "side version\n")
+        firn(project, "commit", "-m", "side final")
+        firn(project, "switch", "main")
+        w(project, "shared.txt", "main version\n")
+        firn(project, "commit", "-m", "main final")
+        p = firn(project, "merge", "side", check=False)
+        assert p.returncode == 1  # conflict: exit 1
+        assert "merge conflict" in p.stderr
+        assert "shared.txt" in p.stderr
+        assert "--abort" in p.stderr  # the escape hatch is named
+        # markers on disk, git-shaped
+        content = (project / "shared.txt").read_text()
+        assert "<<<<<<< ours" in content
+        assert "main version" in content
+        assert "side version" in content
+        assert ">>>>>>> theirs" in content
+        # status reports the pending merge
+        p = firn(project, "status")
+        assert "merge in progress" in p.stdout
+        p = firn(project, "status", "--json")
+        assert json.loads(p.stdout)["merge_pending"] is True
+        # commit while unresolved: blocked, exit 1, no layer
+        p = firn(project, "commit", "-m", "forgot", check=False)
+        assert p.returncode == 1
+        # resolve and complete: two-parent layer
+        w(project, "shared.txt", "resolved\n")
+        p = firn(project, "commit", "-m", "resolved")
+        assert p.returncode == 0
+        p = firn(project, "history", "--json")
+        top = json.loads(p.stdout)["commits"][0]
+        assert top["second_parent"] is not None
+        assert top["message"] == "resolved"
+        # pending state cleared
+        p = firn(project, "status", "--json")
+        assert json.loads(p.stdout)["merge_pending"] is False
+
+    def test_merge_abort_journey_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "shared.txt", "base\n")
+        firn(project, "commit", "-m", "base")
+        firn(project, "branch", "side")
+        firn(project, "switch", "side")
+        w(project, "shared.txt", "side\n")
+        firn(project, "commit", "-m", "side final")
+        firn(project, "switch", "main")
+        w(project, "shared.txt", "main\n")
+        firn(project, "commit", "-m", "main final")
+        p = firn(project, "merge", "side", check=False)
+        assert p.returncode == 1
+        p = firn(project, "merge", "--abort")
+        assert p.returncode == 0
+        assert "aborted" in p.stdout
+        # worktree back at main's content, no markers
+        assert (project / "shared.txt").read_text() == "main\n"
+        p = firn(project, "status")
+        assert "clean on main" in p.stdout
+        # a subsequent merge can proceed (state fully cleared)
+        p = firn(project, "merge", "side", check=False)
+        assert p.returncode == 1  # still conflicts, but runs
+
+    def test_fast_forward_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "1\n")
+        firn(project, "commit", "-m", "base")
+        firn(project, "branch", "side")
+        firn(project, "switch", "side")
+        w(project, "a.txt", "side version\n")
+        firn(project, "commit", "-m", "side ahead")
+        firn(project, "switch", "main")
+        p = firn(project, "merge", "side")
+        assert p.returncode == 0
+        assert "fast-forwarded" in p.stdout
+        # main's head advanced — visible in history walking side's commit
+        p = firn(project, "history")
+        assert "side ahead" in p.stdout
+        p = firn(project, "status")
+        assert "clean on main" in p.stdout
