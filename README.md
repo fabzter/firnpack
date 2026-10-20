@@ -2,6 +2,9 @@
 
 > a glacier for your files — every commit a single packed layer of history.
 
+[![ci](https://github.com/fabzter/firnpack/actions/workflows/ci.yml/badge.svg)](https://github.com/fabzter/firnpack/actions/workflows/ci.yml)
+![python](https://img.shields.io/badge/python-3.13.16%20%E2%80%93%203.15-blue)
+
 **firnpack** is version control for people who don't want version control
 machinery. If you work on small projects, on one computer, and you've ever
 wished you could just *save* a version and get back to it later — without
@@ -14,11 +17,15 @@ holds 102 files. That's the whole design.
 
 ## Install
 
-Requires Python 3.13.16 or newer.
+Requires Python 3.13.16 or newer. From a clone:
 
 ```
-pip install firnpack
+pip install .
 ```
+
+which registers both `firnpack` and the shorter `firn` command. (Or run the
+single module directly: `python firnpack.py …` — the whole engine is one
+file.)
 
 ## Quickstart
 
@@ -34,34 +41,84 @@ firnpack diff                # what exactly changed, line by line
 ```
 
 That's the whole daily loop: five commands, no staging, no jargon you have
-to look up. Misspelled a commit message? `firnpack commit` again with
-`-m "fixed"` — the auto-message keeps you honest, `-m` makes it yours.
-
-## Why it's shaped like this
-
-- **One file per commit.** Traditional version control sprays thousands of
-  small files across your disk; on old, slow, failing drives that's the
-  failure mode that hurts. firnpack writes exactly one new file per commit,
-  plus a small manifest that tracks where everything is.
-- **Self-contained history.** Copy the project folder — `.firn/` and all —
-  anywhere: to another machine, a USB stick, a backup drive. It just works.
-  There is no server, no login, nothing to configure.
-- **Layers, not objects.** Firn is old snow that has survived a summer,
-  compacting under its own weight into dense layers. Drill a core through
-  it and you can read history, stratum by stratum. Every commit here is
-  one of those layers: whole, compressed, and verifiable on its own.
+to look up. Misspelled a commit message? `firnpack amend -m "fixed"` replaces
+the head layer without adding a new one.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `firnpack init` | create a repository in this folder |
+| `firnpack init [PATH]` | create a repository in this folder (or PATH) |
 | `firnpack commit [-m MSG]` | pack the working tree into a new layer |
-| `firnpack status` | what changed since the last pack (see `--ignored`) |
+| `firnpack status [--full] [--ignored]` | what changed since the last pack |
+| `firnpack history [-n N] [--all] [BRANCH]` | saved versions, newest first |
 | `firnpack diff` | line-by-line changes vs the last pack |
-| `firnpack history [-n N]` | saved versions, newest first |
+| `firnpack branch NAME [FROM]` | create a branch (at HEAD, or at FROM) |
+| `firnpack switch REF` | move to a branch, or pin to a layer id |
+| `firnpack list-branches` | branches and their heads |
+| `firnpack rename-branch OLD NEW` | rename a branch |
+| `firnpack delete-branch NAME` | delete a branch (warns if heads orphan) |
+| `firnpack merge BRANCH [--abort]` | merge a branch in; abort a pending one |
+| `firnpack amend [-m MSG]` | replace the head layer (same parents) |
+| `firnpack restore REF [--to DIR]` | bring a layer back over the worktree |
+| `firnpack export REF --to DIR` | extract a layer to a fresh directory |
+| `firnpack verify` | re-hash every layer; check database consistency |
+| `firnpack compact --keep N [--dry-run] [--yes] [--archive DIR]` | squash old layers, reclaim disk |
 
-*(branching, merging, restoring and more arrive with v1.0 — see the roadmap)*
+Every command accepts `--json` for machine-readable output — firnpack is
+designed to be operated by people *and* by agents; see
+[`docs/agent-contract.md`](docs/agent-contract.md) for the normative
+contract.
+
+## Branching and merging
+
+Branches are names for heads; nothing else. `branch` creates one (staying
+where you are), `switch` moves you — to a branch, or to a pinned layer id
+when you hand it one. `merge` is a plain 3-way merge: clean trees merge into
+one layer that remembers both parents; conflicting trees leave git-style
+markers in the files and a durable "merge in progress" state that `status`
+reports and `merge --abort` clears. A merge never clobbers uncommitted work:
+with drift in the worktree it refuses instead.
+
+## Undo, rescue, explore
+
+- **`amend`** replaces the head layer — fix a message or a file without
+  stacking another version on top. The replaced layer stays on disk until a
+  `compact` collects it.
+- **`restore REF`** brings any layer back over the worktree. If you have
+  uncommitted work, firnpack **rescues it first** as its own layer and tells
+  you — restore never destroys drift.
+- **`export REF --to DIR`** extracts a layer into a fresh directory and
+  touches nothing else: the zero-risk way to look at an old version.
+
+## Checking the glacier
+
+`firnpack verify` re-hashes every layer against its own filename, cross-checks
+the database, and reports dangling references or orphan files. It is the
+answer to "is my history still sound?" after a power cut, a disk scare, or a
+copy between machines.
+
+## History management: compact
+
+Whole-tree layers are the honest price of a glacier you can verify one file
+at a time. When history grows past comfort, `compact --keep N` squashes
+everything below the newest N layers into one foundation layer and reclaims
+the disk.
+
+It is **never automatic and never silent**:
+
+- `--keep N` is required every time — there is no default to trip over;
+- `--dry-run` prints the full plan (what drops, what rewrites, what gets
+  collected, peak disk needed) and changes nothing;
+- real runs require `--yes`;
+- `--archive DIR` exports every layer whose content is about to disappear
+  into a zip before anything is deleted;
+- branches that point into the squashed range refuse the compact by name;
+  branches that sit on rewritten layers follow the rewrite, and the plan and
+  the output say exactly which branch moved where.
+
+A reminder line after `commit` tells you when the glacier crosses 50 layers.
+Nothing is ever compacted behind your back.
 
 ## Ignoring junk
 
@@ -80,12 +137,28 @@ Excluded files are never silently hidden: `status` counts them, and
 - Extraction of a layer is guarded: a corrupt or hostile archive can never
   write outside your project folder, no matter what paths it claims to
   contain.
+- No command destroys uncommitted work: merge, switch and restore all refuse
+  on drift, or rescue it first and say so.
+- History rewrites (compact) require explicit permission, report everything
+  they move, and archive what they delete.
+
+## Documentation
+
+- [`docs/usage.md`](docs/usage.md) — every command: examples, exit codes,
+  JSON shapes
+- [`docs/agent-contract.md`](docs/agent-contract.md) — the normative contract
+  for automated operators
+- [`docs/storage.md`](docs/storage.md) — layer format, database schema,
+  recovery playbook
+- [`docs/decisions.md`](docs/decisions.md) — the decision log
+- [`SPEC.md`](SPEC.md) — the full specification; [`research/`](research/) —
+  the research behind it
 
 ## Status
 
-Early development (M1: init, commit, status, history, diff). The full
-specification lives in [`SPEC.md`](SPEC.md); the design rationale and the
-research behind it in [`research/`](research/).
+v1.0 candidate: the full command surface above is implemented and tested
+(unit, property and end-to-end CLI suites, CI across Linux, Windows and
+macOS). PyPI publication follows the v1.0.0 tag.
 
 ## License
 
