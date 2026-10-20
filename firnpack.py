@@ -23,10 +23,12 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tarfile
 import time
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1289,6 +1291,576 @@ class Repo:
         self._maybe_remind(result)
         return result
 
+    def amend(self, message: str | None = None) -> dict:
+        """Replace the head layer: same parent(s) as head, tree = the
+        current worktree (SPEC 9.3). The old layer stays on disk
+        (write-once); the head moves. Message-only amend when the tree
+        is unchanged. Refuses while a merge is pending."""
+        wt = self._worktree()
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is pending — resolve and commit, or "
+                "merge --abort, before amending"
+            )
+        if wt["head_id"] is None:
+            raise FirnpackError("nothing to amend — the repository is empty")
+        row = self._db.execute(
+            "SELECT parent, second_parent, message FROM layers WHERE id = ?",
+            (wt["head_id"],),
+        ).fetchone()
+        old_parent, old_second, old_msg = row
+
+        files, symlinks, _ignored, _nested = self._walk()
+        entries, stats = self._current_tree(files, symlinks)
+        tree_id = _hash_tree(entries)
+
+        if tree_id == wt["snapshot"] and message is None:
+            # message-only amend keeps the old message by spec ("message
+            # = new (or old if -m omitted)") — but identical record
+            # (same everything) dedups to the same layer: a no-op amend
+            return {"status": "nothing_to_amend", "layer_id": wt["head_id"]}
+
+        msg = message if message is not None else old_msg
+        record = {
+            "format_version": FORMAT_VERSION,
+            "tree_id": tree_id,
+            "parent": old_parent,
+            "second_parent": old_second,
+            "message": msg,
+            "author": self.author,
+            "created_at": _utcnow(),
+        }
+        layer_id = _layer_id(record)
+        meta = dict(record)
+        meta["layer_id"] = layer_id
+        meta["profile"] = "gzip"
+        size = self._write_layer(layer_id, meta, files, symlinks)
+        with self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO layers (id, tree_id, parent, "
+                "second_parent, message, author, created_at, profile, "
+                "file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    layer_id,
+                    tree_id,
+                    old_parent,
+                    old_second,
+                    msg,
+                    self.author,
+                    record["created_at"],
+                    "gzip",
+                    len(files) + len(symlinks),
+                    size,
+                ),
+            )
+            self._set_head(layer_id)
+            self._db.execute(
+                "UPDATE worktree SET head_id = ?, snapshot = ?, "
+                "stat_cache = ?, updated_at = ? WHERE id = 1",
+                (layer_id, tree_id, json.dumps(stats), _utcnow()),
+            )
+        self._sweep_orphans()
+        return {
+            "status": "amended",
+            "layer_id": layer_id,
+            "replaced": wt["head_id"],
+        }
+
+    def restore(self, ref: str, *, to_dir: str | None = None) -> dict:
+        """Extract a layer over the worktree (rescue first if drift),
+        or to a directory when --to is given (SPEC 9.7)."""
+        wt = self._worktree()
+        layer_id = self._resolve_id(ref)
+        if to_dir is not None:
+            dest = Path(to_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            self._extract_layer_to(layer_id, dest)
+            return {"status": "exported", "layer_id": layer_id, "to": str(dest)}
+        # over the worktree: rescue drift first (SPEC 9.7)
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is pending — resolve it, or merge --abort, before restoring"
+            )
+        st = self.status()
+        rescue_id = None
+        if not st["clean"]:
+            files, symlinks, _i, _n = self._walk()
+            entries, _stats = self._current_tree(files, symlinks)
+            tree_id = _hash_tree(entries)
+            record = {
+                "format_version": FORMAT_VERSION,
+                "tree_id": tree_id,
+                "parent": wt["head_id"],
+                "second_parent": None,
+                "message": "auto: drift rescue before restore",
+                "author": self.author,
+                "created_at": _utcnow(),
+            }
+            rescue_id = _layer_id(record)
+            meta = dict(record)
+            meta["layer_id"] = rescue_id
+            meta["profile"] = "gzip"
+            size = self._write_layer(rescue_id, meta, files, symlinks)
+            with self._db:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO layers (id, tree_id, parent, "
+                    "second_parent, message, author, created_at, profile,"
+                    " file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        rescue_id,
+                        tree_id,
+                        wt["head_id"],
+                        None,
+                        record["message"],
+                        self.author,
+                        record["created_at"],
+                        "gzip",
+                        len(files) + len(symlinks),
+                        size,
+                    ),
+                )
+        # move head: branch or pin at the target layer, sync worktree
+        with self._db:
+            if wt["head_kind"] == "branch":
+                self._db.execute(
+                    "UPDATE branches SET head = ? WHERE name = ?",
+                    (layer_id, wt["head_branch"]),
+                )
+            self._db.execute(
+                "UPDATE worktree SET head_id = ?, head_pin = ?, "
+                "updated_at = ? WHERE id = 1",
+                (layer_id, layer_id, _utcnow()),
+            )
+        self._sync_worktree_to(layer_id)
+        return {
+            "status": "restored",
+            "layer_id": layer_id,
+            "rescue_layer": rescue_id,
+        }
+
+    def export(self, ref: str, to_dir: str) -> dict:
+        """Extract a layer into a fresh directory — never destructive
+        (SPEC 9.7). The recommended exploration path."""
+        layer_id = self._resolve_id(ref)
+        dest = Path(to_dir)
+        if dest.exists() and any(dest.iterdir()):
+            raise FirnpackError(
+                f"{dest} already exists and is not empty — export needs "
+                "a fresh directory"
+            )
+        dest.mkdir(parents=True, exist_ok=True)
+        self._extract_layer_to(layer_id, dest)
+        return {"status": "exported", "layer_id": layer_id, "to": str(dest)}
+
+    def _extract_layer_to(self, layer_id: str, dest: Path) -> None:
+        """Safe extraction of a layer into a destination directory:
+        validate all members first, then write (SPEC 5 layers 1-3)."""
+        _, manifest, _ = self._read_layer(layer_id)
+        _warn_patch_level_once()
+        regular = {p for p, v in manifest.items() if v["target"] is None}
+        contents = self._layer_contents(layer_id, regular)
+        for path in sorted(manifest):
+            v = manifest[path]
+            fp = dest / path
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            if v["target"] is not None:
+                fp.symlink_to(v["target"])
+            else:
+                fp.write_bytes(contents[path])
+                mode = v.get("mode", 0o644)
+                if mode == 0o755 and os.name != "nt":
+                    fp.chmod(0o755)
+
+    def verify(self) -> dict:
+        """Re-hash every layer file; cross-check DB and in-band meta
+        (SPEC 9.8). Exit-code contract: 3 on any integrity failure."""
+        problems = []
+        rows = self._db.execute(
+            "SELECT id, tree_id, parent, second_parent, message, author,"
+            " created_at FROM layers"
+        ).fetchall()
+        known = {r[0] for r in rows}
+        for layer_id, tree_id, parent, second, _message, _author, _created in rows:
+            path = self._layer_path(layer_id)
+            if not path.is_file():
+                problems.append(f"missing layer file: {layer_id}")
+                continue
+            try:
+                meta, manifest, _ = self._read_layer(layer_id)
+            except IntegrityError as exc:
+                problems.append(f"layer {layer_id}: {exc}")
+                continue
+            # rebuild the canonical record and re-hash
+            record = {
+                "format_version": FORMAT_VERSION,
+                "tree_id": meta["tree_id"],
+                "parent": meta["parent"],
+                "second_parent": meta["second_parent"],
+                "message": meta["message"],
+                "author": meta["author"],
+                "created_at": meta["created_at"],
+            }
+            if _layer_id(record) != layer_id:
+                problems.append(
+                    f"layer {layer_id}: id mismatch (meta does not hash "
+                    f"to the filename)"
+                )
+            if meta["tree_id"] != tree_id:
+                problems.append(f"layer {layer_id}: tree_id mismatch (DB vs meta)")
+            if parent is not None and parent not in known:
+                problems.append(f"layer {layer_id}: dangling parent {parent}")
+            if second is not None and second not in known:
+                problems.append(f"layer {layer_id}: dangling second_parent {second}")
+        for row in self._db.execute("SELECT name, head FROM branches"):
+            if row[1] not in known:
+                problems.append(f"branch {row[0]}: dangling head {row[1]}")
+        wt = self._worktree()
+        if wt["head_id"] is not None and wt["head_id"] not in known:
+            problems.append("worktree: dangling head_id")
+        # unreferenced files on disk (orphans beyond the sweep)
+        for f in self.layers_dir.glob("*.firn"):
+            if f.stem not in known:
+                problems.append(f"orphan layer file: {f.stem}")
+        if problems:
+            raise IntegrityError("verify failed:\n  " + "\n  ".join(problems))
+        return {"status": "ok", "layers": len(rows)}
+
+    def compact(
+        self,
+        keep: int,
+        *,
+        archive_dir: str | None = None,
+        dry_run: bool = False,
+        yes: bool = False,
+    ) -> dict:
+        """Squash old layers, reclaim disk (SPEC 9.9 — owner-mandated,
+        never automatic, explicit permission only).
+
+        --keep N (required, no default — an agent must state it every
+        time): keep the newest N layers of the head's first-parent
+        chain; everything below the cut becomes one foundation layer.
+        Kept layers are re-parented onto it (layer_ids change —
+        parentage is identity, SPEC 5).
+
+        Refusals (a history rewrite checks first): pending merge; any
+        other branch head or pin reaching into the collapsed set; a
+        kept merge layer whose second_parent reaches below the cut.
+        --keep 1 always works (the deep clean).
+
+        Crash ordering: archive first, then write ALL new layers, then
+        ONE DB transaction, then delete old files (both crash windows
+        safe: pre-swap -> old history intact; post-swap -> new
+        authoritative, old swept).
+
+        Peak-disk check runs up front: new layers are written before
+        old files are deleted; refuse when free space is below the
+        peak (a mid-write ENOSPC is never the failure mode).
+        """
+        wt = self._worktree()
+        if wt["merge_theirs"] is not None:
+            raise FirnpackError(
+                "a merge is pending — resolve it, or merge --abort, before compacting"
+            )
+        if keep < 1:
+            raise FirnpackError("--keep must be >= 1")
+        # first-parent chain from head, newest first
+        chain = []
+        cursor = wt["head_id"]
+        seen = set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            chain.append(cursor)
+            row = self._db.execute(
+                "SELECT parent FROM layers WHERE id = ?", (cursor,)
+            ).fetchone()
+            cursor = row[0] if row else None
+        if keep >= len(chain):
+            return {
+                "status": "nothing_to_compact",
+                "layers": len(chain),
+            }
+        kept = chain[:keep]
+        collapsed = set(chain[keep:])
+
+        # refusal conditions (SPEC 9.9)
+        for name, head in self._db.execute("SELECT name, head FROM branches"):
+            if name != wt.get("head_branch") and head in collapsed:
+                raise FirnpackError(
+                    f"branch {name!r} points into the collapsed range — "
+                    f"raise --keep or delete the branch first"
+                )
+        if wt["head_pin"] is not None and wt["head_pin"] in collapsed:
+            raise FirnpackError("the pinned head reaches into the collapsed range")
+        for lid in kept:
+            second = self._db.execute(
+                "SELECT second_parent FROM layers WHERE id = ?", (lid,)
+            ).fetchone()[0]
+            if second is not None and second in collapsed:
+                raise FirnpackError(
+                    f"kept layer {lid[:12]} is a merge whose "
+                    f"second_parent falls below the cut — raising --keep "
+                    f"or using --keep 1 keeps the merge structure"
+                )
+
+        # the cut layer's tree becomes the foundation
+        cut_id = chain[keep]
+        _, cut_manifest, _ = self._read_layer(cut_id)
+        old_total = sum(f.stat().st_size for f in self.layers_dir.glob("*.firn"))
+        new_writes = 1 + len(kept)  # foundation + rewritten kept
+        avg = old_total / max(len(chain), 1)
+        peak = old_total + int(avg * new_writes)
+
+        if dry_run:
+            return {
+                "status": "plan",
+                "keep": keep,
+                "layers_total": len(chain),
+                "layers_dropped": len(collapsed),
+                "layers_rewritten": len(kept),
+                "bytes_reclaimed": sum(
+                    (self._layer_path(lid)).stat().st_size for lid in collapsed
+                ),
+                "peak_disk_needed": peak,
+            }
+
+        if not yes:
+            raise FirnpackError(
+                "compact rewrites history and deletes layer files — "
+                "pass --yes to confirm (or --dry-run to preview)"
+            )
+        free = shutil.disk_usage(self.root).free
+        if free < peak:
+            raise FirnpackError(
+                f"not enough disk for the rewrite: ~{peak - free} bytes "
+                f"short of the peak need (~{peak}). Compact writes new "
+                f"layers before deleting old ones (crash safety); free "
+                f"space, or copy the glacier to a roomier drive and "
+                f"compact there — it is self-contained."
+            )
+
+        # archive first (SPEC 9.9: export before deletion)
+        archive_path = None
+        if archive_dir:
+            arc = Path(archive_dir)
+            arc.mkdir(parents=True, exist_ok=True)
+            archive_path = arc / f"firnpack-archive-{_utcnow().replace(':', '')}.zip"
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as zf:
+                for lid in sorted(collapsed):
+                    zf.write(self._layer_path(lid), f"{lid}.firn")
+
+        # build the foundation layer: tree of the cut, new root
+        foundation_record = {
+            "format_version": FORMAT_VERSION,
+            "tree_id": self._db.execute(
+                "SELECT tree_id FROM layers WHERE id = ?", (cut_id,)
+            ).fetchone()[0],
+            "parent": None,
+            "second_parent": None,
+            "message": (
+                f"compact: {len(collapsed)} layers collapsed "
+                f"({collapsed and min(collapsed)[:12]}..{cut_id[:12]}), "
+                f"{len(chain)} -> {len(kept) + 1} layers"
+            ),
+            "author": self.author,
+            "created_at": _utcnow(),
+        }
+        foundation_id = _layer_id(foundation_record)
+        fmeta = dict(foundation_record)
+        fmeta["layer_id"] = foundation_id
+        fmeta["profile"] = "gzip"
+        # copy the cut layer's bytes: the tree is identical; only the
+        # meta differs. Rebuild via _write_layer from the tree.
+        cut_files, cut_links = [], []
+        for path, v in sorted(cut_manifest.items()):
+            if v["target"] is not None:
+                cut_links.append(path)
+            else:
+                cut_files.append(path)
+        fsize = self._write_layer(foundation_id, fmeta, cut_files, cut_links)
+
+        # rewrite kept layers onto the foundation, newest-last so each
+        # parent exists when referenced
+        remap = {cut_id: foundation_id}
+        new_rows = []
+        for lid in reversed(kept):  # oldest kept first
+            row = self._db.execute(
+                "SELECT tree_id, parent, second_parent, message, author,"
+                " created_at FROM layers WHERE id = ?",
+                (lid,),
+            ).fetchone()
+            tree_id, parent, second, message, author, created = row
+            new_parent = remap.get(parent, parent)
+            new_second = remap.get(second, second) if second else None
+            record = {
+                "format_version": FORMAT_VERSION,
+                "tree_id": tree_id,
+                "parent": new_parent,
+                "second_parent": new_second,
+                "message": message,
+                "author": author,
+                "created_at": created,
+            }
+            new_id = _layer_id(record)
+            remap[lid] = new_id
+            meta = dict(record)
+            meta["layer_id"] = new_id
+            meta["profile"] = "gzip"
+            # copy the layer file byte-for-byte except meta: simplest
+            # correct path is re-writing the tree from the old layer
+            _, manifest, _ = self._read_layer(lid)
+            kfiles = [p for p, v in manifest.items() if v["target"] is None]
+            klinks = [p for p, v in manifest.items() if v["target"] is not None]
+            # _write_layer reads from the worktree — but the worktree
+            # is at HEAD, not at this layer. Write from the layer's own
+            # contents instead.
+            size = self._rewrite_layer_from(lid, new_id, meta, kfiles, klinks)
+            new_rows.append(
+                (
+                    new_id,
+                    tree_id,
+                    new_parent,
+                    new_second,
+                    message,
+                    author,
+                    created,
+                    "gzip",
+                    None,
+                    size,
+                )
+            )
+        # fill file_count from old rows
+        new_rows = [
+            (
+                r[0],
+                r[1],
+                r[2],
+                r[3],
+                r[4],
+                r[5],
+                r[6],
+                r[7],
+                self._db.execute(
+                    "SELECT file_count FROM layers WHERE id = ?", (lid,)
+                ).fetchone()[0],
+                r[9],
+            )
+            for r, lid in zip(new_rows, reversed(kept), strict=True)
+        ]
+
+        # ONE DB transaction: swap everything. FK-safe ordering:
+        # (1) insert new rows — foundation first (kept rows' parents are
+        #     only the foundation or other new rows);
+        # (2) move head references (branches, worktree) to new ids;
+        # (3) delete old rows — nothing references them by then.
+        final_head = remap[kept[0]]
+        with self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO layers (id, tree_id, parent, "
+                "second_parent, message, author, created_at, profile, "
+                "file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    foundation_id,
+                    foundation_record["tree_id"],
+                    None,
+                    None,
+                    foundation_record["message"],
+                    self.author,
+                    foundation_record["created_at"],
+                    "gzip",
+                    len(cut_files) + len(cut_links),
+                    fsize,
+                ),
+            )
+            for r in new_rows:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO layers (id, tree_id, parent,"
+                    " second_parent, message, author, created_at, "
+                    "profile, file_count, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    r,
+                )
+            if wt["head_kind"] == "branch":
+                self._db.execute(
+                    "UPDATE branches SET head = ? WHERE name = ?",
+                    (final_head, wt["head_branch"]),
+                )
+            self._db.execute(
+                "UPDATE worktree SET head_id = ?, head_pin = ?, "
+                "updated_at = ? WHERE id = 1",
+                (final_head, final_head, _utcnow()),
+            )
+            # delete old rows in chain order (newest first): a row's
+            # parent-referencer is always the NEWER row, so deleting
+            # newest-first clears every referencer before its target —
+            # per-statement FK checks pass
+            for lid in sorted(
+                collapsed | set(kept),
+                key=lambda x: chain.index(x) if x in chain else 10**9,
+            ):
+                self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
+        # delete now-unreachable old files (write-once discipline ends
+        # only here, under explicit permission)
+        for lid in collapsed | set(kept):
+            old = self._layer_path(lid)
+            if old.exists() and lid not in remap.values():
+                with contextlib.suppress(OSError):
+                    old.unlink()
+        self._sweep_orphans()
+        return {
+            "status": "compacted",
+            "kept": len(kept) + 1,
+            "dropped": len(collapsed),
+            "new_head": final_head,
+            "archive": str(archive_path) if archive_path else None,
+        }
+
+    def _rewrite_layer_from(self, old_id, new_id, meta, files, links) -> int:
+        """Write a new layer whose tree equals an existing layer's,
+        with new meta. Reads content from the OLD layer, not the
+        worktree."""
+        manifest = self._read_layer(old_id)[1]
+        regular = {p for p, v in manifest.items() if v["target"] is None}
+        contents = self._layer_contents(old_id, regular)
+        tmp = self.layers_dir / f"{new_id}.firn.tmp"
+        meta_bytes = _canonical_json(meta)
+        with (
+            open(tmp, "wb") as raw,
+            gzip.GzipFile(
+                fileobj=raw, mode="wb", compresslevel=GZIP_LEVEL, mtime=0
+            ) as gz,
+            tarfile.open(fileobj=gz, mode="w|", format=tarfile.USTAR_FORMAT) as tar,
+        ):
+            ti = tarfile.TarInfo(META_MEMBER)
+            ti.size = len(meta_bytes)
+            ti.mtime = 0
+            ti.mode = 0o644
+            ti.uid = ti.gid = 0
+            ti.uname = ti.gname = ""
+            tar.addfile(ti, io.BytesIO(meta_bytes))
+            for path in sorted(files, key=lambda p: p.encode("utf-8")):
+                v = manifest[path]
+                data = contents[path]
+                ti = tarfile.TarInfo(path)
+                ti.size = len(data)
+                ti.mtime = 0
+                ti.uid = ti.gid = 0
+                ti.uname = ti.gname = ""
+                ti.mode = v.get("mode", 0o644)
+                tar.addfile(ti, io.BytesIO(data))
+            for path in sorted(links, key=lambda p: p.encode("utf-8")):
+                ti = tarfile.TarInfo(path)
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = manifest[path]["target"]
+                ti.mtime = 0
+                ti.uid = ti.gid = 0
+                ti.uname = ti.gname = ""
+                ti.mode = 0o777
+                tar.addfile(ti)
+            raw.flush()
+            os.fsync(raw.fileno())
+        _replace_with_retry(tmp, self._layer_path(new_id))
+        _fsync_dir(self.layers_dir)
+        return self._layer_path(new_id).stat().st_size
+
     def _auto_message(self, parent, entries) -> str:
         n = len(entries)
         if parent is None:
@@ -1854,6 +2426,112 @@ def _cmd_diff(args) -> int:
     return 0
 
 
+def _cmd_amend(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.amend(args.message)
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    if result["status"] == "nothing_to_amend":
+        print("nothing to amend — tree and message unchanged")
+        return 0
+    print(
+        f"amended: layer {result['layer_id'][:12]} (replaced {result['replaced'][:12]})"
+    )
+    return 0
+
+
+def _cmd_restore(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.restore(args.ref, to_dir=args.to_dir)
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    if result["status"] == "exported":
+        print(f"extracted layer {result['layer_id'][:12]} to {result['to']}")
+        return 0
+    rescue = result.get("rescue_layer")
+    print(f"restored layer {result['layer_id'][:12]} into the worktree")
+    if rescue:
+        print(
+            f"your uncommitted work was saved as layer {rescue[:12]} "
+            f"(export it with: firnpack export {rescue[:12]} --to DIR)"
+        )
+    return 0
+
+
+def _cmd_export(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.export(args.ref, args.to_dir)
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    print(f"exported layer {result['layer_id'][:12]} to {result['to']}")
+    return 0
+
+
+def _cmd_verify(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.verify()
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    print(f"verify ok — {result['layers']} layers re-hashed and consistent")
+    return 0
+
+
+def _cmd_compact(args) -> int:
+    repo = Repo.discover()
+    try:
+        result = repo.compact(
+            args.keep,
+            archive_dir=args.archive_dir,
+            dry_run=args.dry_run,
+            yes=args.yes,
+        )
+    finally:
+        repo.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] != "error" else 1
+    status = result["status"]
+    if status == "nothing_to_compact":
+        print(f"nothing to compact — {result['layers']} layers on the chain")
+        return 0
+    if status == "plan":
+        print("compact plan (dry run):")
+        print(f"  layers total:    {result['layers_total']}")
+        print(f"  layers dropped:  {result['layers_dropped']}")
+        print(f"  layers rewritten:{result['layers_rewritten']}")
+        print(f"  bytes reclaimed: {result['bytes_reclaimed']}")
+        print(f"  peak disk needed:{result['peak_disk_needed']}")
+        print("  run again with --yes to execute")
+        return 0
+    if status == "compacted":
+        print(
+            f"compacted: {result['kept']} layers kept, "
+            f"{result['dropped']} dropped; new head "
+            f"{result['new_head'][:12]}"
+        )
+        if result["archive"]:
+            print(f"  removed layers archived to {result['archive']}")
+        return 0
+    print(f"compact: {status}")
+    return 0
+
+
 def _cmd_merge(args) -> int:
     repo = Repo.discover()
     try:
@@ -2086,6 +2764,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_merge.add_argument("--abort", action="store_true", help="abort a pending merge")
     p_merge.add_argument("--json", action="store_true")
     p_merge.set_defaults(func=_cmd_merge)
+
+    p_amend = sub.add_parser("amend", help="replace the head layer")
+    p_amend.add_argument("-m", "--message", default=None)
+    p_amend.add_argument("--json", action="store_true")
+    p_amend.set_defaults(func=_cmd_amend)
+
+    p_restore = sub.add_parser(
+        "restore", help="extract a layer over the worktree (or --to DIR)"
+    )
+    p_restore.add_argument("ref")
+    p_restore.add_argument(
+        "--to", dest="to_dir", default=None, help="extract to a directory"
+    )
+    p_restore.add_argument("--json", action="store_true")
+    p_restore.set_defaults(func=_cmd_restore)
+
+    p_export = sub.add_parser("export", help="extract a layer to a fresh directory")
+    p_export.add_argument("ref")
+    p_export.add_argument("--to", dest="to_dir", required=True)
+    p_export.add_argument("--json", action="store_true")
+    p_export.set_defaults(func=_cmd_export)
+
+    p_verify = sub.add_parser("verify", help="re-hash all layers; check DB consistency")
+    p_verify.add_argument("--json", action="store_true")
+    p_verify.set_defaults(func=_cmd_verify)
+
+    p_compact = sub.add_parser("compact", help="squash old layers, reclaim disk")
+    p_compact.add_argument("--keep", type=int, required=True)
+    p_compact.add_argument("--archive", dest="archive_dir", default=None)
+    p_compact.add_argument(
+        "--dry-run", action="store_true", help="plan without mutating"
+    )
+    p_compact.add_argument("--yes", action="store_true", help="confirm the rewrite")
+    p_compact.add_argument("--json", action="store_true")
+    p_compact.set_defaults(func=_cmd_compact)
 
     p_branch = sub.add_parser("branch", help="create a branch")
     p_branch.add_argument("name")

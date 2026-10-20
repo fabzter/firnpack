@@ -163,7 +163,7 @@ class TestJourneyRecovery:
 
 
 class TestJourneyOutputContracts:
-    """JSON output is an agent-facing contract: exact, stable, documented."""
+    """JSON output is a stable, documented contract."""
 
     def test_commit_json_shape(self, project):
         project.mkdir()

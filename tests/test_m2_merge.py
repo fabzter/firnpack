@@ -324,6 +324,7 @@ class TestMergeGuards:
         assert "keep.txt" in result["conflicts"]
         assert (project / "keep.txt").read_text() == "modified on main\n"
 
+
 class TestMerge3Text:
     """Table tests for the merge kernel's conflict rule (git-style
     adjacency) — every silent-corruption case found in review, pinned:
@@ -387,9 +388,7 @@ class TestMerge3Text:
             ours = "".join(ours_lines)
             theirs = "".join(theirs_lines)
             result = firnpack_merge3(base, ours, theirs)
-            expected = "".join(
-                f"O{i}\n" if i % 2 == 0 else f"T{i}\n" for i in range(8)
-            )
+            expected = "".join(f"O{i}\n" if i % 2 == 0 else f"T{i}\n" for i in range(8))
             assert result == expected, f"property violated for {base!r}"
 
 
