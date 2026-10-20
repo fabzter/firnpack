@@ -287,10 +287,19 @@ contains, in this order:
 **Two hashes** (this is the load-bearing detail)
 
 - **`tree_id`** = SHA-256 over the tree only — for each tracked path in sorted
-  order: `sha256(path bytes ∥ file bytes)`, hashed again over the concatenation.
-  Truncated to 40 hex. *Ignores* message/author/time → identical trees share a
-  tree_id. Used by: `status` (worktree.snapshot), merge (base/ours/theirs trees),
-  and the nothing-to-pack check.
+  order: `sha256(path bytes ∥ exec-bit ∥ file bytes)` — where exec-bit is a
+  single byte `0x01` if the source file's owner-exec bit is set, else `0x00`
+  (symlinks use `0x00`; their identity is the link target). Hashed again over
+  the concatenation. Truncated to 40 hex. *Ignores* message/author/time →
+  identical trees share a tree_id. Used by: `status` (worktree.snapshot),
+  merge (base/ours/theirs trees), and the nothing-to-pack check.
+  **Owner decision 2026-10-20 (1a)**: the exec bit participates in identity —
+  mode-only changes (chmod ±x) are detectable drift, never silent
+  divergence between disk and history. The stat cache stores the mode
+  alongside size/mtime so `status` flags a chmod cheaply; the file is then
+  re-packed with its new mode bit. No compatibility cost: firnpack has no
+  pre-1.0 layers outside test fixtures (fixed during the development
+  window).
 - **`layer_id`** = SHA-256 over a **canonical commit record** — a JSON object
   with sorted keys and a trailing newline containing exactly:
   `format_version`, `tree_id`, `parent`, `second_parent` (null), `message`,
@@ -461,9 +470,13 @@ CREATE TABLE worktree (        -- exactly one row (id=1): ALL mutable repo state
     head_kind    TEXT NOT NULL CHECK (head_kind IN ('branch','pin')),
     head_branch  TEXT,          -- branch name when head_kind='branch'
     head_pin     TEXT,          -- layer_id when head_kind='pin'
-    head_id      TEXT NOT NULL REFERENCES layers(id),  -- resolved current layer
+    head_id      TEXT REFERENCES layers(id),  -- resolved current layer.
+                                 -- NULL until the first commit (9.1: empty
+                                 -- repo, no initial layer). Enforced by the
+                                 -- trigger below: once set, NULL is rejected.
     snapshot     TEXT,          -- tree_id of worktree at last sync (NULL: unknown)
-    stat_cache   TEXT,          -- JSON: {path: [size, mtime_ns]} of tracked files
+    stat_cache   TEXT,          -- JSON: {path: [size, mtime_ns, mode]} of
+                                 -- tracked files (mode: 0o644/0o755 — 5)
     merge_theirs TEXT,          -- layer_id of THEIRS head while a merge is pending;
                                  -- NULL otherwise. Set on conflicted merge; consumed
                                  -- by commit into the new layer's second_parent.
@@ -472,6 +485,16 @@ CREATE TABLE worktree (        -- exactly one row (id=1): ALL mutable repo state
                                  -- restore --flatten-symlinks, cleared by commit.
     updated_at   TEXT NOT NULL
 );
+
+-- Enforce "NULL until the first commit, then never NULL again".
+-- A partial/conditional index can't do this (SQLite indexes don't
+-- enforce values); a trigger can, cheaply, and stays within stdlib SQLite.
+CREATE TRIGGER worktree_head_id_no_null
+AFTER UPDATE OF head_id ON worktree
+WHEN NEW.head_id IS NULL AND OLD.head_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'worktree.head_id cannot return to NULL');
+END;
 ```
 
 Notes:

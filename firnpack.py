@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS worktree (
     flattened_pending TEXT,
     updated_at        TEXT NOT NULL
 );
+-- NULL until the first commit, then never NULL again (SPEC 6).
+-- SQLite indexes cannot enforce values; a trigger can, cheaply.
+CREATE TRIGGER IF NOT EXISTS worktree_head_id_no_null
+AFTER UPDATE OF head_id ON worktree
+WHEN NEW.head_id IS NULL AND OLD.head_id IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'worktree.head_id cannot return to NULL');
+END;
 """
 
 
@@ -337,17 +345,23 @@ def _validate_member_types(members) -> None:
 # ---------------------------------------------------------------- hashing
 
 
-def _hash_tree(entries: dict[str, tuple[int, bytes | None, str | None]]) -> str:
-    """tree_id: per-path sha256(path ∥ content), then over the concatenation.
+def _hash_tree(
+    entries: dict[str, tuple[int, bytes | None, str | None, bool]],
+) -> str:
+    """tree_id: per-path sha256(path ∥ exec-bit ∥ content), then over the
+    concatenation (SPEC §5, owner decision 1a 2026-10-20).
 
-    ``entries`` maps posix path -> (size, content_bytes, symlink_target).
-    Only one of content/target is set; symlinks hash their target bytes.
+    ``entries`` maps posix path -> (size, content_bytes, symlink_target,
+    exec_bit). Only one of content/target is set; symlinks hash their
+    target bytes and use exec_bit=False. Mode-only changes (chmod ±x)
+    therefore change tree_id — never silently invisible drift.
     """
     digest = hashlib.sha256()
     for path in sorted(entries, key=lambda p: p.encode("utf-8")):
-        _, content, target = entries[path]
+        _, content, target, exec_bit = entries[path]
         data = target.encode("utf-8") if content is None else content
-        digest.update(hashlib.sha256(path.encode("utf-8") + data).digest())
+        prefix = b"\x01" if exec_bit else b"\x00"
+        digest.update(hashlib.sha256(prefix + path.encode("utf-8") + data).digest())
     return digest.hexdigest()[:ID_LEN]
 
 
@@ -568,20 +582,30 @@ class Repo:
         return files, symlinks, ignored, nested
 
     def _current_tree(self, files, symlinks):
-        """Hash every tracked file/symlink. Returns (entries, per_path_stat)."""
+        """Hash every tracked file/symlink. Returns (entries, per_path_stat).
+
+        entries carry the exec bit so tree_id covers mode changes (1a);
+        stats store the mode so the stat cache can flag a chmod without
+        rehashing (stat fast-path compares [size, mtime, mode]).
+        """
         entries, stats = {}, {}
         for path in files:
             fp = self.root / path
             st = fp.stat()
             data = fp.read_bytes()
-            entries[path] = (len(data), data, None)
-            stats[path] = [st.st_size, st.st_mtime_ns]
+            exec_bit = bool(st.st_mode & 0o100)
+            entries[path] = (len(data), data, None, exec_bit)
+            stats[path] = [
+                st.st_size,
+                st.st_mtime_ns,
+                0o755 if exec_bit else 0o644,
+            ]
         for path in symlinks:
             fp = self.root / path
             target = os.readlink(fp)
-            entries[path] = (len(target.encode("utf-8")), None, target)
+            entries[path] = (len(target.encode("utf-8")), None, target, False)
             st = fp.lstat()
-            stats[path] = [st.st_size, st.st_mtime_ns]
+            stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
         return entries, stats
 
     # -- layer I/O
@@ -841,7 +865,7 @@ class Repo:
         n = len(entries)
         if parent is None:
             return f"pack {n} files"
-        total = sum(size for size, _, _ in entries.values())
+        total = sum(e[0] for e in entries.values())
         _, manifest, _ = self._read_layer(parent)
         old_total = sum(v["size"] for v in manifest.values())
         delta = total - old_total
@@ -902,10 +926,12 @@ class Repo:
         if wt["head_id"]:
             _, head_manifest, _ = self._read_layer(wt["head_id"])
 
-        # Stage 1 (fast, stat-cache): size+mtime match -> assume clean.
+        # Stage 1 (fast, stat-cache): size+mtime+mode match -> assume clean
+        # (mode in the cache catches chmod even when mtime is untouched).
         # Stage 2 (rehash): stat mismatch or cache miss -> compare actual
-        # bytes against the head layer, so mtime-touch-without-change
-        # stays clean (SPEC §22 mtime test).
+        # bytes AND mode against the head layer, so mtime-touch-without-
+        # change stays clean (SPEC §22 mtime test) while chmod ±x is
+        # detected as drift (owner decision 1a).
         modified, clean = [], []
         suspect = []
         for path in files:
@@ -915,11 +941,13 @@ class Repo:
             except OSError:
                 continue
             cached = cache.get(path)
+            disk_mode = 0o755 if st.st_mode & 0o100 else 0o644
             if (
                 cached
                 and not full
                 and cached[0] == st.st_size
                 and cached[1] == st.st_mtime_ns
+                and (len(cached) < 3 or cached[2] == disk_mode)
             ):
                 clean.append(path)
                 continue
@@ -937,7 +965,12 @@ class Repo:
                 if entry is None or entry.get("target") is not None:
                     # not in head, or head has it as a symlink: changed
                     modified.append(path)
-                elif head_data.get(path) == new:
+                    continue
+                head_mode = entry.get("mode", 0o644)
+                disk_mode = (
+                    0o755 if (self.root / path).stat().st_mode & 0o100 else 0o644
+                )
+                if head_data.get(path) == new and head_mode == disk_mode:
                     clean.append(path)
                 else:
                     modified.append(path)

@@ -597,7 +597,12 @@ class TestRoundTrip:
         for path in ("a.txt", ".gitignore"):
             fp = project / path
             if fp.exists():
-                entries[path] = (fp.stat().st_size, fp.read_bytes(), None)
+                entries[path] = (
+                    fp.stat().st_size,
+                    fp.read_bytes(),
+                    None,
+                    bool(fp.stat().st_mode & 0o100),
+                )
         repo.close()
         assert firnpack._hash_tree(entries) == r["tree_id"]
 
@@ -638,3 +643,71 @@ class TestOrphanSweep:
         assert not list(layers.glob("*.tmp"))
         assert not (layers / f"{'0' * 40}.firn").exists()
         assert (layers / f"{r1['layer_id']}.firn").is_file()
+
+
+class TestChangeMatrix:
+    """The anti-silent-drift family guard: every mutable attribute
+    firnpack tracks must produce drift -> pack -> new identity. If a new
+    tracked attribute is ever added without touching this matrix, the
+    matrix extension is the reminder (owner decision 1a, 2026-10-20)."""
+
+    MUTATIONS = [
+        ("content", lambda p: p.write_bytes(p.read_bytes() + b"more\n")),
+        ("exec_bit", lambda p: p.chmod(0o755)),
+    ]
+
+    @pytest.mark.parametrize("name,mutate", MUTATIONS, ids=lambda v: v)
+    def test_mutation_never_silent(self, project, name, mutate):
+        write(project, "a.txt", "start\n")
+        repo = Repo.init(project)
+        first = repo.commit("base")
+        repo.close()
+        mutate(project / "a.txt")
+        repo = Repo.discover()
+        st = repo.status()
+        assert st["modified"] == ["a.txt"], f"{name} change was invisible"
+        st2 = repo.commit("after " + name)
+        repo.close()
+        assert st2["status"] == "packed", f"{name} change did not pack"
+        assert st2["layer_id"] != first["layer_id"], (
+            f"{name} change did not alter identity"
+        )
+
+    def test_chmod_round_trip(self, project):
+        """chmod +x then commit: the layer stores 0o755, and a chmod back
+        is again detectable (both directions)."""
+        write(project, "s.sh", "echo hi\n")
+        repo = Repo.init(project)
+        repo.commit("plain")
+        (project / "s.sh").chmod(0o755)
+        repo.commit("now exec")
+        _, manifest, _ = repo._read_layer(repo._worktree()["head_id"])
+        assert manifest["s.sh"]["mode"] == 0o755
+        repo.close()
+        (project / "s.sh").chmod(0o644)
+        repo = Repo.discover()
+        st = repo.status()
+        repo.close()
+        assert st["modified"] == ["s.sh"]
+
+
+class TestHeadIdContract:
+    def test_head_id_null_only_before_first_commit(self, project):
+        """2a: NULL is legal exactly until the first layer exists."""
+        import sqlite3
+
+        write(project, "a.txt", "x\n")
+        repo = Repo.init(project)
+        wt = repo._worktree()
+        assert wt["head_id"] is None  # empty repo: NULL allowed
+        repo.commit("first")
+        repo.close()
+        db = sqlite3.connect(project / ".firn" / "glacier.db")
+        try:
+            db.execute("UPDATE worktree SET head_id = NULL WHERE id = 1")
+            db.commit()
+            raise AssertionError("trigger did not reject head_id -> NULL")
+        except sqlite3.IntegrityError:
+            pass
+        finally:
+            db.close()
