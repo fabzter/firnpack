@@ -464,6 +464,10 @@ class Repo:
         cfg["history"] = {"reminder_threshold": "50"}
         with open(firn / "config", "w", encoding="utf-8") as fh:
             cfg.write(fh)
+        # Seed the ignore file only when none exists (SPEC §9.1, Q2):
+        # one unambiguous junk pattern for office lock files.
+        if not (root / ".gitignore").exists():
+            (root / ".gitignore").write_text("~$*\n", encoding="utf-8")
         _fsync_dir(firn)
         return Repo(root)
 
@@ -905,6 +909,9 @@ class Repo:
             ):
                 clean.append(path)
                 continue
+            if not cached:
+                # never committed before: it's "added", not "modified"
+                continue
             suspect.append(path)
 
         if suspect and wt["head_id"]:
@@ -920,9 +927,6 @@ class Repo:
                     clean.append(path)
                 else:
                     modified.append(path)
-        elif suspect:
-            # empty repo: nothing to compare against; everything is "added"
-            pass
 
         for path in symlinks:
             target = os.readlink(self.root / path)
@@ -1159,6 +1163,9 @@ def _cmd_status(args) -> int:
             print(f"  missing    {path}")
     if result["merge_pending"]:
         print("merge in progress — resolve markers, then commit")
+    if args.ignored and result["ignored"]:
+        for path in result["ignored"]:
+            print(f"  ignored    {path}")
     return 0
 
 

@@ -77,7 +77,7 @@ class TestCommit:
         result = repo.commit("first")
         repo.close()
         assert result["status"] == "packed"
-        assert result["files"] == 2
+        assert result["files"] == 3  # + seeded .gitignore
         layer = project / ".firn" / "layers" / f"{result['layer_id']}.firn"
         assert layer.is_file()
         files = [p for p in (project / ".firn").rglob("*") if p.is_file()]
@@ -176,7 +176,7 @@ class TestCommit:
         repo = Repo.init(project)
         result = repo.commit("with link")
         repo.close()
-        assert result["files"] == 2
+        assert result["files"] == 3  # + seeded .gitignore
         path = project / ".firn" / "layers" / f"{result['layer_id']}.firn"
         with gzip.open(path, "rb") as gz, tarfile.open(fileobj=gz, mode="r|") as tar:
             lm = {m.name: m for m in tar}["link.txt"]
@@ -187,11 +187,11 @@ class TestCommit:
         write(project, "a.txt", "alpha\n")
         repo = Repo.init(project)
         r1 = repo.commit()
-        assert r1["message"] == "pack 1 files"
+        assert r1["message"] == "pack 2 files"  # a.txt + seeded .gitignore
         write(project, "a.txt", "alpha\nbeta\n")
         r2 = repo.commit()
         repo.close()
-        assert "pack 1 files" in r2["message"]
+        assert "pack 2 files" in r2["message"]
 
 
 # ---------------------------------------------------------------- gitignore
@@ -251,7 +251,8 @@ class TestGitignore:
         st = repo.status()
         repo.close()
         assert st["nested_gitignore"] is True
-        assert r["files"] == 3  # a.txt + sub/.gitignore + sub/inner.txt
+        assert r["files"] == 4
+        # a.txt + seeded .gitignore + sub/.gitignore + sub/inner.txt
         # (nested rules are NOT read in v1 — inner.txt stays tracked)
 
 
@@ -296,7 +297,9 @@ class TestStatus:
         result = repo.status()
         repo.close()
         assert result["head"] is None
-        assert result["clean"] is True
+        # the seeded .gitignore exists but is not yet packed
+        assert result["added"] == [".gitignore"]
+        assert result["clean"] is False
 
 
 # ----------------------------------------------------------------- history
