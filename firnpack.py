@@ -769,8 +769,6 @@ class Repo:
             "author": self.author,
             "created_at": now,
         }
-        layer_id = _layer_id(record)
-
         if message is None:
             if not self._cfg.getboolean("core", "autoname", fallback=True):
                 raise FirnpackError(
@@ -778,6 +776,9 @@ class Repo:
                 )
             message = self._auto_message(parent, entries)
         record["message"] = message
+        # SPEC §5: the canonical commit record — and therefore layer_id —
+        # includes the message. Hash only after it is set.
+        layer_id = _layer_id(record)
 
         meta = dict(record)
         meta["layer_id"] = layer_id
@@ -816,6 +817,7 @@ class Repo:
                 "updated_at = ? WHERE id = 1",
                 (layer_id, tree_id, json.dumps(stats), _utcnow()),
             )
+        self._sweep_orphans()
         result = {
             "status": "packed",
             "layer_id": layer_id,
@@ -878,6 +880,18 @@ class Repo:
                     "VALUES ('reminder_last_count', ?)",
                     (str(count),),
                 )
+
+    def _sweep_orphans(self) -> None:
+        """Remove crash leftovers: stray .tmp files and layer files with no
+        DB row (SPEC §13). Referenced layers are never touched."""
+        for tmp in self.layers_dir.glob("*.firn.tmp"):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+        known = {row[0] for row in self._db.execute("SELECT id FROM layers")}
+        for layer_file in self.layers_dir.glob("*.firn"):
+            if layer_file.stem not in known:
+                with contextlib.suppress(OSError):
+                    layer_file.unlink()
 
     def status(self, *, full: bool = False, list_ignored: bool = False) -> dict:
         files, symlinks, ignored, nested = self._walk()
@@ -1049,14 +1063,17 @@ class Repo:
 
         head_paths = set(manifest)
         cur_paths = set(current)
-        wanted = {p for p in cur_paths & head_paths}
+        wanted = set(head_paths)  # deleted files need their old content too
         head_data = self._layer_contents(wt["head_id"], wanted) if wt["head_id"] else {}
 
         for path in sorted(cur_paths | head_paths):
             if path not in cur_paths:
-                results.append(self._diff_entry(path, None, b"", "deleted"))
+                old = head_data.get(path)
+                if old is None and manifest[path]["target"] is not None:
+                    old = manifest[path]["target"].encode("utf-8")
+                results.append(self._diff_entry(path, old, b"", "deleted"))
             elif path not in head_paths:
-                results.append(self._diff_entry(path, current[path], None, "added"))
+                results.append(self._diff_entry(path, None, current[path], "added"))
             else:
                 old = head_data.get(path)
                 if old is None and manifest[path]["target"] is not None:

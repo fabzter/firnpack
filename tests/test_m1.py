@@ -10,7 +10,6 @@ import os
 import subprocess
 import sys
 import tarfile
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -138,6 +137,35 @@ class TestCommit:
         assert meta["format_version"] == 1
         assert meta["parent"] is None
 
+    def test_layer_id_covers_message(self, project):
+        """SPEC §5: layer_id hashes the record INCLUDING the message.
+
+        Regression: a message-only difference must change layer_id —
+        otherwise amend could never rewrite a message (v0.4 bug class).
+        """
+        write(project, "a.txt", "alpha\n")
+        repo = Repo.init(project)
+        result = repo.commit("first")
+        repo.close()
+        path = project / ".firn" / "layers" / f"{result['layer_id']}.firn"
+        with gzip.open(path, "rb") as gz, tarfile.open(fileobj=gz, mode="r") as tar:
+            meta = json.loads(tar.extractfile(firnpack.META_MEMBER).read())
+        record = {
+            key: meta[key]
+            for key in (
+                "format_version",
+                "tree_id",
+                "parent",
+                "second_parent",
+                "message",
+                "author",
+                "created_at",
+            )
+        }
+        assert firnpack._layer_id(record) == result["layer_id"]
+        altered = dict(record, message="something else")
+        assert firnpack._layer_id(altered) != result["layer_id"]
+
     def test_deterministic_bytes(self, project):
         """Same tree+meta -> byte-identical layer file (gzip mtime=0)."""
         ids = []
@@ -148,9 +176,12 @@ class TestCommit:
             repo = Repo.init(root)
             import firnpack as fp
 
+            real = fp._utcnow
             fp._utcnow = lambda: "2026-10-19T00:00:00+00:00"
-            r = repo.commit("same")
-            fp._utcnow = lambda: str(datetime.now(UTC))
+            try:
+                r = repo.commit("same")
+            finally:
+                fp._utcnow = real
             repo.close()
             ids.append(
                 (root / ".firn" / "layers" / f"{r['layer_id']}.firn").read_bytes()
@@ -361,6 +392,8 @@ class TestDiff:
         by_path = {e["path"]: e for e in d["entries"]}
         assert by_path["b.txt"]["status"] == "added"
         assert by_path["a.txt"]["status"] == "deleted"
+        assert "-alpha" in by_path["a.txt"]["hunks"]
+        assert "+new" in by_path["b.txt"]["hunks"]
 
     def test_binary_file_note(self, project):
         write(project, "img.bin", b"\x00\x01\x02")
@@ -569,3 +602,25 @@ class TestFileCountInvariant:
             repo.close()
         files = [p for p in (project / ".firn").rglob("*") if p.is_file()]
         assert len(files) == 5 + 2
+
+
+class TestOrphanSweep:
+    def test_next_commit_sweeps_crash_leftovers(self, project):
+        """SPEC §13: a crash leaves a stray .tmp or an unreferenced layer
+        file; the next commit sweeps both, and never touches referenced
+        layers."""
+        write(project, "a.txt", "one\n")
+        repo = Repo.init(project)
+        r1 = repo.commit("first")
+        repo.close()
+        layers = project / ".firn" / "layers"
+        # simulate both crash windows
+        (layers / f"{r1['layer_id']}.firn.tmp").write_bytes(b"partial junk")
+        (layers / f"{'0' * 40}.firn").write_bytes(b"orphan layer")
+        write(project, "a.txt", "one\ntwo\n")
+        repo = Repo.discover()
+        repo.commit("second")
+        repo.close()
+        assert not list(layers.glob("*.tmp"))
+        assert not (layers / f"{'0' * 40}.firn").exists()
+        assert (layers / f"{r1['layer_id']}.firn").is_file()
