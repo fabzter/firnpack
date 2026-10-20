@@ -17,11 +17,17 @@ PY = sys.executable
 
 
 def firn(cwd, *args, check=True, input_text=None):
+    # encoding="utf-8": the CLI writes UTF-8 (main() reconfigures its
+    # streams); text=True alone would decode with the platform locale
+    # (cp1252 on the Windows runners) and unicode assertions could never
+    # match, no matter what the module does.
     proc = subprocess.run(
         [PY, str(MODULE), *args],
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         input=input_text,
     )
     if check and proc.returncode != 0:

@@ -783,3 +783,30 @@ class TestHeadIdContract:
             pass
         finally:
             db.close()
+
+
+class TestWindowsCarryForward:
+    """The carry-forward policy, exercised on POSIX by faking _WINDOWS."""
+
+    def test_symlink_to_file_does_not_inherit_777(self, project, monkeypatch):
+        """Head has link.txt as a SYMLINK (mode 0o777); the worktree now
+        holds a regular file there. On Windows the carried mode must NOT
+        be 0o777 — only regular-file head entries donate their mode, or
+        a POSIX restore would apply an all-executable regular file."""
+        import firnpack as fp
+
+        monkeypatch.setattr(fp, "_WINDOWS", True)
+        write(project, "real.txt", "data\n")
+        (project / "link.txt").symlink_to("real.txt")
+        repo = fp.Repo.init(project)
+        repo.commit("base")  # head: link.txt is a symlink (mode 0o777)
+        # replace the symlink with a regular file
+        (project / "link.txt").unlink()
+        write(project, "link.txt", "now a file\n")
+        result = repo.commit("replaced")
+        repo.close()
+        _, manifest, _ = fp.Repo(project)._read_layer(result["layer_id"])
+        mode = manifest["link.txt"]["mode"]
+        assert mode in (0o644, 0o755), (
+            f"symlink head entry donated its mode: {oct(mode)}"
+        )

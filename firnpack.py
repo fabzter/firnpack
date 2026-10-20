@@ -382,17 +382,31 @@ _WINDOWS = os.name == "nt"
 def _file_mode(path, head_mode: int | None = None) -> int:
     """Layer/cache mode for a regular file: 0o755/0o644.
 
-    Cross-platform policy (SPEC 5 note, 2026-10-20): on POSIX the exec bit
-    is real (chmod) and participates in identity. On Windows there is no
-    user-settable exec bit (os.chmod toggles read-only only), so:
+    PROPOSED cross-platform policy (awaiting owner ratification — not yet
+    a SPEC note): on POSIX the exec bit is real (chmod) and participates
+    in identity. On Windows there is no user-settable exec bit, so:
       - the disk value cannot drift (nothing can change it), and
-      - a layer written on another OS must not false-drift here: when the
-        head stores a mode, it is carried forward, keeping history stable
-        when a glacier moves between platforms.
+      - a layer written on another OS must not false-drift here: the
+        head's stored mode is carried forward for regular files.
     """
     if _WINDOWS and head_mode is not None:
         return head_mode
     return 0o755 if _disk_exec_bit(path.stat()) else 0o644
+
+
+def _carry_mode(carry: dict | None, path: str) -> int | None:
+    """Carry-forward mode for a regular file — ONLY from regular-file
+    manifest entries. A head entry that was a symlink (target set) must
+    not donate its 0o777: the path is a regular file now, and an
+    all-executable regular file would be applied verbatim on a POSIX
+    restore. Returns None when nothing is carried (POSIX, empty repo, or
+    a genuinely new path)."""
+    if not carry:
+        return None
+    entry = carry.get(path)
+    if entry is None or entry.get("target") is not None:
+        return None
+    return entry.get("mode")
 
 
 def _layer_id(record: dict) -> str:
@@ -631,7 +645,7 @@ class Repo:
             fp = self.root / path
             st = fp.stat()
             data = fp.read_bytes()
-            head_mode = carry.get(path, {}).get("mode") if carry else None
+            head_mode = _carry_mode(carry, path)
             mode = _file_mode(fp, head_mode)
             entries[path] = (len(data), data, None, mode == 0o755)
             stats[path] = [st.st_size, st.st_mtime_ns, mode]
@@ -685,7 +699,7 @@ class Repo:
                 ti.mtime = 0
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = ""
-                head_mode = carry.get(path, {}).get("mode") if carry else None
+                head_mode = _carry_mode(carry, path)
                 ti.mode = _file_mode(fp, head_mode)
                 tar.addfile(ti, io.BytesIO(data))
             for path in sorted(symlinks, key=lambda p: p.encode("utf-8")):
