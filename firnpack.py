@@ -353,7 +353,7 @@ def _hash_tree(
     """tree_id: per-path sha256(kind ∥ exec ∥ path ∥ NUL ∥ content), then
     over the concatenation (SPEC §5). Exec-in-identity: owner decision
     1a (ratified 2026-10-20). Kind byte + NUL separator: collision
-    audit 2026-10-20 — PROPOSED, pending owner ratification (B2).
+    audit 2026-10-20 — ratified (owner decision 2026-10-20, item B2).
 
     ``entries`` maps posix path -> (size, content_bytes, symlink_target,
     exec_bit). The kind byte disambiguates a symlink's target bytes from
@@ -394,12 +394,13 @@ _WINDOWS = os.name == "nt"
 def _file_mode(path, head_mode: int | None = None) -> int:
     """Layer/cache mode for a regular file: 0o755/0o644.
 
-    PROPOSED cross-platform policy (awaiting owner ratification — not yet
-    a SPEC note): on POSIX the exec bit is real (chmod) and participates
-    in identity. On Windows there is no user-settable exec bit, so:
+    Cross-platform policy (owner decision 2026-10-20, item B — SPEC
+    §5): on POSIX the exec bit is real (chmod) and participates in
+    identity. On Windows there is no user-settable exec bit, so:
       - the disk value cannot drift (nothing can change it), and
       - a layer written on another OS must not false-drift here: the
-        head's stored mode is carried forward for regular files.
+        head's stored mode is carried forward for regular files
+        (regular-file head entries only — see _carry_mode).
     """
     if _WINDOWS and head_mode is not None:
         return head_mode

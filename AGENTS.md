@@ -141,17 +141,28 @@ firnpack/
 ## 8. Status & next steps
 
 - [x] AGENTS.md — initial context saved (this file)
-- [x] SPEC.md v0.13 (review closed) — complete draft; owner decisions landed:
-      Python floor 3.13.16+ (requires-python), `.gitignore` compatibility, MIT,
-      `firn` alias, keep-modified conflicts, gzip-only v1.0, `compact` command
-      (Q18 follow-up), blocking marker guard, tarfile defense-in-depth
+- [x] SPEC.md v0.14 — review closed 2026-10-18; v0.14 amendments ratified
+      2026-10-20 (item B: Windows exec-mode carry-forward, §5; item B2:
+      amended tree_id formula kind∥exec∥path∥NUL∥data, §5; §9.9 refusal
+      conditions re-specified reference-based: ancestry refusals, kept-head
+      branch remap, garbage collection of unreachable survivors, deferred FK
+      enforcement). Earlier owner decisions: Python floor 3.13.16+,
+      `.gitignore` compatibility, MIT, `firn` alias, keep-modified conflicts,
+      gzip-only v1.0, `compact` command (Q18), blocking marker guard,
+      tarfile defense-in-depth
 - [x] Review session — CLOSED 2026-10-18 (owner sign-off): all §25
       questions resolved (Q21 container and Q16 benchmark honesty ratified
       post-close), including Q20 (symlink probe→refuse→flatten, with the
       agent-continuation output contract) and the housekeeping batch
       (Q3–Q15, accept-all). SPEC stamped v0.13.
-- [ ] firnpack.py implementation + tests
-- [ ] CI/CD + PyPI publishing
+- [x] firnpack.py implementation — M1 + M2 complete: all 16 v1.0 commands
+      (init, commit, status, history, diff, branch, switch, list-branches,
+      rename-branch, delete-branch, merge, amend, restore, export, verify,
+      compact); 177 tests green (unit + property + e2e CLI), ruff clean
+- [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main and m2/branching;
+      release.yml (trusted publishing) in place, not yet fired
+- [ ] README upgrade + docs/ tree (SPEC §20) — next deliverable
+- [ ] PyPI publish (v1.0.0 tag → release.yml)
 - [ ] Skill repo (separate, git submodule link)
 
 ## 9. Working rules for agents in this repo
@@ -175,5 +186,5 @@ firnpack/
   agent operation — they describe how agents use the tool, but never
   attribute authorship of the work to AI.
 
-Last updated: 2026-10-19 — drafted during the founding session; kept current
-through the spec review close (v0.13) and the M1 kickoff.
+Last updated: 2026-10-20 — drafted during the founding session; kept current
+through the spec review close (v0.13), the v0.14 amendments, and M2 completion.

@@ -1,12 +1,13 @@
-# firnpack — SPEC v0.13 (REVIEW CLOSED 2026-10-18 — owner sign-off)
+# firnpack — SPEC v0.14 (REVIEW CLOSED 2026-10-18; v0.14 amendments ratified 2026-10-20)
 
 > **Status: REVIEW CLOSED 2026-10-18 (owner sign-off) — approved for
-> implementation.** All §25 questions owner-resolved; the Q20
+> implementation; v0.14 amendments owner-ratified 2026-10-20.** All §25
+> questions owner-resolved; the Q20
 > flatten-persistence chain was ratified by the owner 2026-10-19. No
 > outstanding items. Companions: `AGENTS.md` (founding context),
 > `research/` (web research backing decisions). v0.1→v0.2: self-review fixes
 > (dual identity hashes, HEAD-file removal, fast-forward merge, schema
-> alignment). v0.2→v0.3: external advisory round — de-circularized `layer_id`
+> alignment). v0.2→v0.3: external review round — de-circularized `layer_id`
 > (hashes a canonical commit record, never the payload containing it), v1.0
 > goes gzip-only (zstd portability), full crash-consistency protocol (fsync
 > ordering + Windows/OneDrive replace retry), honest bytes-per-commit budget,
@@ -92,6 +93,27 @@
 > now survives one command further); ci.yml floor leg pinned to exactly
 > `3.13.16`; container decision ratified; research/packaging-ci.md
 > matrix synced to 3.13.16–3.15.
+>
+> v0.13→v0.14: M2 implementation round — owner decisions 2026-10-20:
+> **B ratified** — Windows exec-mode carry-forward (§5 canonical TAR
+> rules: on Windows a regular file's mode is taken from the head
+> layer's manifest entry, regular-file head entries only; genuinely new
+> paths pack `0o644`). **B2 ratified** — amended `tree_id` formula (§5:
+> per-path `sha256(kind ∥ exec ∥ path ∥ NUL ∥ data)`; the kind byte and
+> NUL separator close the two collision classes of the original 1a
+> formula — path/content boundary bleed and symlink-target vs
+> file-content — with regression tests pinning both). **§9.9 refusal
+> conditions re-specified as reference-based** (owner-ratified):
+> ancestry refusals (a branch cut from inside the collapsed range and
+> committed on is refused by reachability analysis, not head
+> membership), **remap** for branch heads sitting at kept layers (they
+> follow the rewrite; the v0.13 "loses merge base" warning case no
+> longer exists), **garbage collection** of unreachable survivors that
+> reference the deleted set (amend orphans, second-parent stubs of
+> collapsed merges — archived, planned as `layers_garbage_collected`,
+> reported in the result), and deferred FK enforcement in the swap
+> transaction (consistency checked at COMMIT against the guard-proven
+> final state). Changelog wording normalized (v0.2→v0.3 entry).
 
 ---
 
@@ -280,6 +302,16 @@ contains, in this order:
 - mtime, uid, gid, uname, gname are zeroed; mode normalized: `0o644` for files,
   `0o755` if the source file's execute bit is set, `0o777` for symlinks (tar
   convention). Identity comes from content, not clock or owner.
+- **Windows exec-mode carry-forward (owner decision 2026-10-20, item B)**:
+  Windows has no user-settable execute bit, so on Windows the mode of a
+  regular file is taken from the head layer's stored manifest entry
+  (carry-forward) instead of the disk — and only when that entry is
+  itself a regular file (a symlink head entry never donates its `0o777`).
+  The disk value cannot drift there (nothing can change it), and layers
+  written on POSIX must not false-drift when the repo is used from
+  Windows: a repo copied between machines keeps its exec bits exactly.
+  Genuinely new paths (no head entry) pack as `0o644`. Symlinks are
+  unaffected (`0o777` always).
 - pax headers: none (no long-path pax records for paths ≤ 100 chars; longer
   paths use ustar prefix splitting; beyond that, pax `path` record only —
   deterministic per path).
@@ -298,12 +330,11 @@ contains, in this order:
     so `path ∥ NUL ∥ data` is unambiguous — `{"a": b"bc"}` and
     `{"ab": b"c"}` hashed identically without it (collision audit
     2026-10-20).
-  **Collision audit 2026-10-20 — kind byte + NUL separator: PROPOSED,
-  pending owner ratification.** The original 1a formula
+  **Collision audit 2026-10-20 — kind byte + NUL separator: RATIFIED
+  (owner decision 2026-10-20, item B2).** The original 1a formula
   (`path ∥ exec ∥ bytes`) had two ambiguities: the path/content boundary
   and symlink-target vs file-content. The implementation uses the
-  formula above with regression tests pinning both collisions; the
-  amended formula awaits owner ratification (owner item (B2)). *Ignores*
+  formula above with regression tests pinning both collisions. *Ignores*
   message/author/time → identical trees share a tree_id. Used by:
   `status` (worktree.snapshot), merge (base/ours/theirs trees), and the
   nothing-to-pack check.
@@ -722,21 +753,41 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   count, and bytes; new root). The kept layers are re-parented onto it —
   which **rewrites their layer_ids** (parentage is part of identity, §5).
   `--dry-run` prints the full plan (layers dropped, layers rewritten,
-  bytes reclaimed) and mutates nothing.
-- **Refusal conditions (compaction is a history rewrite — check first)**:
+  layers garbage-collected, bytes reclaimed, peak disk need) and mutates
+  nothing.
+- **Refusal conditions (compaction is a history rewrite — check first)**.
+  The guard is **reference-based**: FK constraints see every reference,
+  not just branch heads, so the analysis walks ancestry (`parent` and
+  `second_parent`, any depth) from every live root — branch heads, the
+  worktree head or pin, and the second parents of kept merge layers
+  (ratified 2026-10-20, owner decision; supersedes the head-membership
+  sketch):
   1. a merge is pending (`merge_theirs` set) — compact refuses outright;
-  2. any *other* branch head resolves into the collapsed set;
-  3. any pin resolves into the collapsed set;
+  2. any *other* branch head resolves into the collapsed set, **or any
+     reachable survivor's ancestry enters the deleted set** (a branch
+     cut from inside the range and committed on has its head outside
+     the range but its parent inside — the refusal names the branch);
+  3. the pin resolves into the collapsed set;
   4. the kept range contains a merge layer whose `second_parent` reaches
      below the cut (re-pointing it would invent history — refuse, or
      choose a higher cutoff; `--keep 1` always works and is the
      recommended deep-clean).
-  Conditions 2–3 exist because rewriting the current branch would strand
-  those references without a merge base. Kept-range references from other
-  branches are **not** refused (their old layers stay on disk, their
-  history intact) but compact **warns**: those branches lose their merge
-  base with the compacted branch (merging them afterwards finds no LCA
-  and refuses with a humane message — documented, visible, never silent).
+  **Remap instead of refuse**: a branch head sitting exactly at a KEPT
+  layer is repointed to that layer's rewritten id in the same
+  transaction — the branch follows the rewrite, and its merge base with
+  the compacted branch is preserved (the v0.13 "warns: loses merge
+  base" case no longer exists).
+  **Garbage collection**: unreachable survivors that reference the
+  deleted set — amend orphans (the replaced head stays a live row until
+  a compact), second-parent stubs of collapsed merges with their branch
+  deleted — are collected with the rewrite: counted in the dry-run plan
+  (`layers_garbage_collected`), included in the `--archive` export,
+  rows and files deleted, result reports `garbage_collected`. Disk
+  reclaim covers them; nothing reachable is ever collected.
+  The swap transaction runs under **deferred FK enforcement**:
+  consistency is checked at COMMIT against the final state, which the
+  guard phase has already proven consistent — every referencer of a
+  deleted row was remapped, collected, or refused.
 - **Peak-disk check (up front, before any write)**: compact writes the
   foundation + N rewritten kept layers **before** deleting old files, so
   peak need ≈ old-layers total + (N+1) layer writes. `--dry-run` reports
@@ -746,9 +797,11 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   ones (crash-safety, § below); free up space, or copy the repo folder
   to a roomier drive and compact there — the glacier is self-contained.
   A mid-write ENOSPC is never the failure mode; the refusal is.
-- **Crash ordering**: `--archive` export (if any) → write ALL new layers
-  (foundation + rewritten kept) to disk → ONE DB transaction (swap head
-  pointer to the new chain, delete old rows) → delete old files that are
+- **Crash ordering**: `--archive` export (if any — includes collected
+  garbage) → write ALL new layers (foundation + rewritten kept) to disk
+  → ONE DB transaction (insert new rows, swap head pointer and branch
+  remaps to the new chain, delete old and garbage-collected rows,
+  deferred FK enforcement) → delete old files that are
   now unreachable → orphan sweep on next command. Crash windows are both
   safe: pre-DB-swap → old history fully intact, new files are orphans
   (swept); post-swap/pre-delete → new history authoritative, old files
@@ -759,11 +812,12 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   (the rewrite would orphan merge structure). `--keep 1` — squash
   everything into a single layer — always works and is the recommended
   deep-clean.
-- **Reachability-safe deletion**: after the rewrite, a layer file is
-  deleted only if unreachable from **every** branch head and pin. A branch
-  that still references old layers keeps them — compact never silently
-  rewrites history another branch points at (that branch gets a notice at
-  its next command).
+- **Reachability-safe deletion**: a layer file is deleted only when it is
+  unreachable after the rewrite — from **every** branch head, pin, and
+  kept merge edge. A branch still pointing at a kept layer follows the
+  rewrite (remap); a branch pointing into the collapsed range blocks it
+  (refusal). Compact never silently rewrites history another branch
+  depends on, and never deletes anything reachable.
 - `--archive DIR` — before deletion, the compacted-away range is exported
   to `DIR/firnpack-archive-<date>.zip` (outside `.firn/`, human-visible,
   consciously OneDrive-syncable). Without `--archive` the deletion is
