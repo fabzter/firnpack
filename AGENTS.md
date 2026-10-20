@@ -185,6 +185,14 @@ firnpack/
   Exception: `AGENTS.md` and `docs/agent-contract.md`, whose *purpose* is
   agent operation — they describe how agents use the tool, but never
   attribute authorship of the work to AI.
+  Scope, as ratified by owner decision C (2026-10-20): the ban targets
+  *authorship attribution* — nothing may claim or imply the work was
+  produced by AI. Mentions that describe who *operates* the tool (the
+  G4 operability goal, operator callouts in usage docs, conflict
+  markers designed for machine resolution) are product requirements
+  and are permitted in any file; the two exempt files remain the
+  normative operator documents. When in doubt: attribution =
+  forbidden, operation = permitted.
 
 Last updated: 2026-10-20 — drafted during the founding session; kept current
 through the spec review close (v0.13), the v0.14 amendments, and M2 completion.
