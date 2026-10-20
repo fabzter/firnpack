@@ -650,6 +650,10 @@ class Repo:
                     "INSERT INTO branches (name, head, created_at) VALUES (?, ?, ?)",
                     (branch, layer_id, now),
                 )
+            # head_pin is pin-only (SPEC 6): a branch worktree must
+            # never carry one, or stale pins spuriously trip the
+            # compact pin-refusal
+            self._db.execute("UPDATE worktree SET head_pin = NULL WHERE id = 1")
         else:
             self._db.execute(
                 "UPDATE worktree SET head_pin = ?, head_id = ?, updated_at = ? "
@@ -995,7 +999,11 @@ class Repo:
                 self._db.execute(
                     "UPDATE worktree SET head_id = ?, head_pin = ?, "
                     "updated_at = ? WHERE id = 1",
-                    (theirs_id, theirs_id, _utcnow()),
+                    (
+                        theirs_id,
+                        theirs_id if wt["head_kind"] == "pin" else None,
+                        _utcnow(),
+                    ),
                 )
             self._sync_worktree_to(theirs_id)
             return {
@@ -1429,7 +1437,11 @@ class Repo:
             self._db.execute(
                 "UPDATE worktree SET head_id = ?, head_pin = ?, "
                 "updated_at = ? WHERE id = 1",
-                (layer_id, layer_id, _utcnow()),
+                (
+                    layer_id,
+                    layer_id if wt["head_kind"] == "pin" else None,
+                    _utcnow(),
+                ),
             )
         self._sync_worktree_to(layer_id)
         return {
@@ -1582,25 +1594,92 @@ class Repo:
         kept = chain[:keep]
         collapsed = set(chain[keep:])
 
-        # refusal conditions (SPEC 9.9)
+        # --- reference-based safety analysis (SPEC 9.9) ---
+        # Rows going away: collapsed ones, plus kept ones (kept layers
+        # are rewritten under new ids). Anything still pointing at
+        # them must be remapped, refused, or garbage-collected:
+        #   - branch heads at a kept id -> remapped to the new id
+        #   - branch heads or the pin inside collapsed -> refusal
+        #   - a reachable survivor whose ancestry (parent or
+        #     second_parent, any depth) enters the deleted set ->
+        #     refusal: live history would lose its parents
+        #   - an unreachable survivor referencing the deleted set ->
+        #     garbage-collected (amend orphans, second-parent stubs
+        #     of collapsed merges), archived like any dropped layer
+        deleted = collapsed | set(kept)
+        all_rows = {
+            r[0]: (r[1], r[2])
+            for r in self._db.execute("SELECT id, parent, second_parent FROM layers")
+        }
+        head_names = {
+            h: n for n, h in self._db.execute("SELECT name, head FROM branches")
+        }
+        branch_remaps: dict[str, str] = {}
         for name, head in self._db.execute("SELECT name, head FROM branches"):
-            if name != wt.get("head_branch") and head in collapsed:
+            if name == wt.get("head_branch"):
+                continue  # the worktree branch repoints to final_head
+            if head in collapsed:
                 raise FirnpackError(
                     f"branch {name!r} points into the collapsed range — "
                     f"raise --keep or delete the branch first"
                 )
-        if wt["head_pin"] is not None and wt["head_pin"] in collapsed:
+            if head in kept:
+                branch_remaps[name] = head
+        if wt["head_kind"] == "pin" and wt["head_id"] in collapsed:
             raise FirnpackError("the pinned head reaches into the collapsed range")
         for lid in kept:
-            second = self._db.execute(
-                "SELECT second_parent FROM layers WHERE id = ?", (lid,)
-            ).fetchone()[0]
+            second = all_rows[lid][1]
             if second is not None and second in collapsed:
                 raise FirnpackError(
                     f"kept layer {lid[:12]} is a merge whose "
                     f"second_parent falls below the cut — raising --keep "
                     f"or using --keep 1 keeps the merge structure"
                 )
+        # live roots in old-row space: branch heads outside the
+        # deleted set, plus kept merges' second parents (rewritten
+        # kept layers keep referencing them)
+        roots = {h for h in head_names if h not in deleted}
+        for lid in kept:
+            s = all_rows[lid][1]
+            if s is not None and s not in deleted:
+                roots.add(s)
+        reachable: set[str] = set()
+        stack = list(roots)
+        while stack:
+            cur = stack.pop()
+            if cur in reachable or cur in deleted or cur not in all_rows:
+                continue
+            reachable.add(cur)
+            for ref in all_rows[cur]:
+                if ref:
+                    stack.append(ref)
+        # fixpoint: survivors referencing the deleted set are either
+        # reachable (refuse — a live line of history depends on them)
+        # or garbage (collect)
+        gc: set[str] = set()
+        while True:
+            wave = {
+                rid
+                for rid, (p, s) in all_rows.items()
+                if rid not in deleted
+                and rid not in gc
+                and (p in deleted or p in gc or s in deleted or s in gc)
+            }
+            if not wave:
+                break
+            for rid in sorted(wave):
+                if rid in reachable:
+                    who = head_names.get(rid)
+                    detail = (
+                        f"branch {who!r} descends from layers that would be collapsed"
+                        if who
+                        else f"layer {rid[:12]} is still referenced, but "
+                        f"its ancestry reaches into the collapsed range"
+                    )
+                    raise FirnpackError(
+                        f"{detail} — raise --keep, or merge/delete the branch first"
+                    )
+            gc |= wave
 
         # the cut layer's tree becomes the foundation
         cut_id = chain[keep]
@@ -1617,8 +1696,9 @@ class Repo:
                 "layers_total": len(chain),
                 "layers_dropped": len(collapsed),
                 "layers_rewritten": len(kept),
+                "layers_garbage_collected": len(gc),
                 "bytes_reclaimed": sum(
-                    (self._layer_path(lid)).stat().st_size for lid in collapsed
+                    self._layer_path(lid).stat().st_size for lid in collapsed | gc
                 ),
                 "peak_disk_needed": peak,
             }
@@ -1645,7 +1725,7 @@ class Repo:
             arc.mkdir(parents=True, exist_ok=True)
             archive_path = arc / f"firnpack-archive-{_utcnow().replace(':', '')}.zip"
             with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as zf:
-                for lid in sorted(collapsed):
+                for lid in sorted(collapsed | gc):
                     zf.write(self._layer_path(lid), f"{lid}.firn")
 
         # build the foundation layer: tree of the cut, new root
@@ -1747,13 +1827,14 @@ class Repo:
             for r, lid in zip(new_rows, reversed(kept), strict=True)
         ]
 
-        # ONE DB transaction: swap everything. FK-safe ordering:
-        # (1) insert new rows — foundation first (kept rows' parents are
-        #     only the foundation or other new rows);
-        # (2) move head references (branches, worktree) to new ids;
-        # (3) delete old rows — nothing references them by then.
+        # ONE DB transaction: swap everything. defer_foreign_keys
+        # moves FK enforcement to COMMIT, so intra-transaction
+        # statement ordering no longer matters — what matters is that
+        # the FINAL state is consistent: every referencer of a deleted
+        # row was remapped, garbage-collected, or refused above.
         final_head = remap[kept[0]]
         with self._db:
+            self._db.execute("PRAGMA defer_foreign_keys = ON")
             self._db.execute(
                 "INSERT OR REPLACE INTO layers (id, tree_id, parent, "
                 "second_parent, message, author, created_at, profile, "
@@ -1783,15 +1864,22 @@ class Repo:
                     "UPDATE branches SET head = ? WHERE name = ?",
                     (final_head, wt["head_branch"]),
                 )
+            for name, old in branch_remaps.items():
+                self._db.execute(
+                    "UPDATE branches SET head = ? WHERE name = ?",
+                    (remap[old], name),
+                )
             self._db.execute(
                 "UPDATE worktree SET head_id = ?, head_pin = ?, "
                 "updated_at = ? WHERE id = 1",
-                (final_head, final_head, _utcnow()),
+                (
+                    final_head,
+                    final_head if wt["head_kind"] == "pin" else None,
+                    _utcnow(),
+                ),
             )
-            # delete old rows in chain order (newest first): a row's
-            # parent-referencer is always the NEWER row, so deleting
-            # newest-first clears every referencer before its target —
-            # per-statement FK checks pass
+            for lid in gc:
+                self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
             for lid in sorted(
                 collapsed | set(kept),
                 key=lambda x: chain.index(x) if x in chain else 10**9,
@@ -1799,7 +1887,7 @@ class Repo:
                 self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
         # delete now-unreachable old files (write-once discipline ends
         # only here, under explicit permission)
-        for lid in collapsed | set(kept):
+        for lid in collapsed | set(kept) | gc:
             old = self._layer_path(lid)
             if old.exists() and lid not in remap.values():
                 with contextlib.suppress(OSError):
@@ -1809,6 +1897,7 @@ class Repo:
             "status": "compacted",
             "kept": len(kept) + 1,
             "dropped": len(collapsed),
+            "garbage_collected": len(gc),
             "new_head": final_head,
             "archive": str(archive_path) if archive_path else None,
         }
@@ -2515,6 +2604,8 @@ def _cmd_compact(args) -> int:
         print(f"  layers total:    {result['layers_total']}")
         print(f"  layers dropped:  {result['layers_dropped']}")
         print(f"  layers rewritten:{result['layers_rewritten']}")
+        if result["layers_garbage_collected"]:
+            print(f"  garbage collected:{result['layers_garbage_collected']}")
         print(f"  bytes reclaimed: {result['bytes_reclaimed']}")
         print(f"  peak disk needed:{result['peak_disk_needed']}")
         print("  run again with --yes to execute")
@@ -2525,6 +2616,11 @@ def _cmd_compact(args) -> int:
             f"{result['dropped']} dropped; new head "
             f"{result['new_head'][:12]}"
         )
+        if result["garbage_collected"]:
+            print(
+                f"  {result['garbage_collected']} unreachable layer(s) "
+                f"garbage-collected"
+            )
         if result["archive"]:
             print(f"  removed layers archived to {result['archive']}")
         return 0

@@ -511,3 +511,126 @@ class TestJourneyMerge:
         assert "side ahead" in p.stdout
         p = firn(project, "status")
         assert "clean on main" in p.stdout
+
+
+class TestJourneySafety:
+    """The safety commands through the CLI: amend, restore, export,
+    verify, compact — including the compact reference guards (a branch
+    remap, an off-chain ancestry refusal, amend-orphan GC). Every
+    journey ends with `verify` proving the glacier is consistent."""
+
+    def test_amend_restore_verify_roundtrip(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "first\n")
+        p = firn(project, "commit", "-m", "first")
+        first_id = json.loads(firn(project, "history", "--json").stdout)["commits"][0][
+            "id"
+        ]
+        w(project, "a.txt", "first, fixed\n")
+        p = firn(project, "amend", "-m", "first (fixed)")
+        assert "amended" in p.stdout
+        p = firn(project, "verify")
+        assert "verify ok" in p.stdout
+        # history shows the amended message, not the original
+        p = firn(project, "history")
+        assert "first (fixed)" in p.stdout
+        # restore back to the original layer (rescued drift-free)
+        p = firn(project, "restore", first_id[:10])
+        assert "restored" in p.stdout
+        assert (project / "a.txt").read_text() == "first\n"
+        p = firn(project, "verify")
+        assert "verify ok" in p.stdout
+
+    def test_export_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "content\n")
+        firn(project, "commit", "-m", "c0")
+        head = json.loads(firn(project, "history", "--json").stdout)["commits"][0]["id"]
+        dest = project.parent / "exported"
+        p = firn(project, "export", head[:10], "--to", str(dest))
+        assert "exported" in p.stdout
+        assert (dest / "a.txt").read_text() == "content\n"
+        # refuses a non-fresh destination
+        p = firn(project, "export", head[:10], "--to", str(dest), check=False)
+        assert p.returncode == 1
+
+    def test_compact_cli_with_branch_remapped(self, project):
+        project.mkdir()
+        firn(project, "init")
+        for i in range(4):
+            w(project, f"f{i}.txt", f"content {i}\n" * (i + 1))
+            firn(project, "commit", "-m", f"c{i}")
+        firn(project, "branch", "feature")
+        p = firn(project, "compact", "--keep", "2", "--dry-run")
+        assert "compact plan" in p.stdout
+        p = firn(project, "compact", "--keep", "2", "--yes")
+        assert "compacted" in p.stdout
+        # feature was at main's head -> remapped along with it
+        p = firn(project, "list-branches", "--json")
+        heads = {b["name"]: b["head"] for b in json.loads(p.stdout)["branches"]}
+        assert heads["feature"] == heads["main"]
+        p = firn(project, "verify")
+        assert "verify ok" in p.stdout
+
+    def test_compact_cli_refuses_offchain_ancestry(self, project):
+        project.mkdir()
+        firn(project, "init")
+        ids = []
+        for i in range(5):
+            w(project, f"f{i}.txt", f"content {i}\n" * (i + 1))
+            firn(project, "commit", "-m", f"c{i}")
+            ids.append(
+                json.loads(firn(project, "history", "--json").stdout)["commits"][0][
+                    "id"
+                ]
+            )
+        firn(project, "branch", "feature", ids[3][:10])
+        firn(project, "switch", "feature")
+        w(project, "f99.txt", "feature work\n")
+        firn(project, "commit", "-m", "feature commit")
+        firn(project, "switch", "main")
+        p = firn(project, "compact", "--keep", "2", "--yes", check=False)
+        assert p.returncode == 1
+        combined = p.stdout + p.stderr
+        assert "descends from layers" in combined
+        # humane refusal, never a raw DB error
+        assert "IntegrityError" not in combined
+        assert "FOREIGN KEY" not in combined
+        # repo fully intact and usable
+        p = firn(project, "verify")
+        assert "verify ok" in p.stdout
+        p = firn(project, "history", "--json")
+        assert json.loads(p.stdout)["count"] == 5
+
+    def test_compact_cli_gcs_amend_orphan(self, project):
+        project.mkdir()
+        firn(project, "init")
+        for i in range(3):
+            w(project, f"f{i}.txt", f"content {i}\n" * (i + 1))
+            firn(project, "commit", "-m", f"c{i}")
+        firn(project, "amend", "-m", "c2 amended")
+        p = firn(project, "compact", "--keep", "1", "--dry-run")
+        assert "garbage collected:1" in p.stdout
+        p = firn(project, "compact", "--keep", "1", "--yes")
+        assert "compacted" in p.stdout
+        assert "garbage-collected" in p.stdout
+        p = firn(project, "verify")
+        assert "verify ok" in p.stdout
+
+    def test_branch_management_cli(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "1\n")
+        firn(project, "commit", "-m", "c0")
+        firn(project, "branch", "wip")
+        p = firn(project, "list-branches")
+        assert "wip" in p.stdout
+        firn(project, "rename-branch", "wip", "feature")
+        p = firn(project, "list-branches")
+        assert "feature" in p.stdout
+        assert "wip" not in p.stdout
+        firn(project, "delete-branch", "feature")
+        p = firn(project, "list-branches")
+        assert "feature" not in p.stdout

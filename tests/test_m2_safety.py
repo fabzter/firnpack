@@ -376,3 +376,169 @@ class TestCompact:
         st = repo.status()
         repo.close()
         assert st["clean"]
+
+
+def _fk_check(repo):
+    return repo._db.execute("PRAGMA foreign_key_check").fetchall()
+
+
+def _delete_branch(repo, name):
+    with repo._db:
+        repo._db.execute("DELETE FROM branches WHERE name = ?", (name,))
+
+
+class TestCompactRefs:
+    """Reference-based compact safety: the guard must see ANCESTRY, not
+    just branch heads — every survivor of the rewrite that points into
+    the deleted set is remapped, refused, or garbage-collected, and the
+    final DB state passes PRAGMA foreign_key_check.
+    """
+
+    def test_refuses_offchain_branch_ancestry(self, project):
+        """A branch cut from inside the range, then committed on: its
+        head is OUTSIDE collapsed but its parent is inside. The old
+        head-membership guard missed this and died on a raw
+        IntegrityError; the humane refusal must name the branch."""
+        repo = Repo.init(project)
+        ids = _chain(repo, 5)  # ids[3] = c1, deep in the range
+        repo.branch("feature", ids[3][:10])
+        repo.switch("feature")
+        write(project, "f99.txt", "feature work\n")
+        repo.commit("feature commit")
+        repo.switch("main")
+        with pytest.raises(FirnpackError, match="feature.*descends"):
+            repo.compact(2, yes=True)
+        # repo fully intact
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        assert repo.history()["count"] == 5
+        repo.close()
+
+    def test_remaps_branch_at_kept_head(self, project):
+        """A branch sitting exactly at main's HEAD (an old kept id) is
+        repointed to the rewritten id — not refused, not dangling."""
+        repo = Repo.init(project)
+        _chain(repo, 4)
+        repo.branch("feature")
+        result = repo.compact(2, yes=True)
+        fh = repo._db.execute(
+            "SELECT head FROM branches WHERE name = 'feature'"
+        ).fetchone()[0]
+        mh = repo._db.execute(
+            "SELECT head FROM branches WHERE name = 'main'"
+        ).fetchone()[0]
+        assert fh == mh == result["new_head"]
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_ff_merge_leaves_no_stale_pin(self, project):
+        """head_pin is pin-only: a fast-forward on a branch worktree
+        must not leave one behind, or a later legal compact trips the
+        pin refusal spuriously."""
+        repo = Repo.init(project)
+        _chain(repo, 2)
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "f10.txt", "feature\n")
+        repo.commit("feature commit")
+        repo.switch("main")
+        m = repo.merge("feature")
+        assert m["status"] == "fast_forwarded"
+        pin = repo._db.execute("SELECT head_pin FROM worktree WHERE id = 1").fetchone()[
+            0
+        ]
+        assert pin is None
+        _delete_branch(repo, "feature")
+        write(project, "f20.txt", "more\n")
+        repo.commit("after ff")
+        result = repo.compact(1, yes=True)
+        assert result["status"] == "compacted"
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_gcs_collapsed_merge_stub(self, project):
+        """When the merge layer itself is collapsed and its branch is
+        gone, the second-parent stub is unreachable garbage: collected
+        (row + file), archived, listed in the plan."""
+        repo = Repo.init(project)
+        write(project, "f0.txt", "zero\n")
+        repo.commit("c0")
+        write(project, "f1.txt", "one\n")
+        repo.commit("c1")
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "feat.txt", "feature work\n")
+        repo.commit("feature commit")
+        stub_id = repo._worktree()["head_id"]
+        repo.switch("main")
+        write(project, "f2.txt", "main moves\n")
+        repo.commit("c2")  # diverge -> real merge, not FF
+        m = repo.merge("feature")
+        assert m["status"] == "merged"
+        write(project, "f3.txt", "after merge\n")
+        repo.commit("c3")
+        _delete_branch(repo, "feature")
+        plan = repo.compact(1, dry_run=True)
+        assert plan["layers_garbage_collected"] == 1
+        arc = str(project / "archive")
+        result = repo.compact(1, yes=True, archive_dir=arc)
+        assert result["garbage_collected"] == 1
+        rows = repo._db.execute(
+            "SELECT count(*) FROM layers WHERE id = ?", (stub_id,)
+        ).fetchone()[0]
+        assert rows == 0
+        assert not (project / ".firn" / "layers" / f"{stub_id}.firn").exists()
+        import zipfile
+
+        with zipfile.ZipFile(result["archive"]) as zf:
+            assert f"{stub_id}.firn" in zf.namelist()
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_refuses_kept_merge_stub_diving_into_collapsed(self, project):
+        """A KEPT merge layer keeps referencing its second parent; if
+        that stub's ancestry dives into the collapsed range, deleting
+        those layers would orphan a live reference — refuse."""
+        repo = Repo.init(project)
+        write(project, "f0.txt", "zero\n")
+        repo.commit("c0")
+        write(project, "f1.txt", "one\n")
+        repo.commit("c1")
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "feat.txt", "feature work\n")
+        repo.commit("feature commit")
+        repo.switch("main")
+        write(project, "f2.txt", "main moves\n")
+        repo.commit("c2")
+        m = repo.merge("feature")
+        assert m["status"] == "merged"
+        _delete_branch(repo, "feature")
+        with pytest.raises(FirnpackError, match="still referenced"):
+            repo.compact(1, yes=True)
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
+
+    def test_gcs_amend_orphan(self, project):
+        """Amend leaves the replaced head as an unreachable row (its
+        file stays, write-once). Compact must collect it when its
+        parent is rewritten away — the disk-reclaim promise covers
+        amend orphans too."""
+        repo = Repo.init(project)
+        ids = _chain(repo, 3)
+        old_head = ids[0]
+        repo.amend(message="c2 amended")
+        result = repo.compact(1, yes=True)
+        assert result["garbage_collected"] == 1
+        rows = repo._db.execute(
+            "SELECT count(*) FROM layers WHERE id = ?", (old_head,)
+        ).fetchone()[0]
+        assert rows == 0
+        assert not (project / ".firn" / "layers" / f"{old_head}.firn").exists()
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        repo.close()
