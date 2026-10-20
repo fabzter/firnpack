@@ -5,6 +5,10 @@ on:
     branches: ["**"]
   pull_request:
 
+# NOTE (2026-10-20): `ubuntu-latest` migrates to Ubuntu 26 beginning
+# 2026-10-19 (actions/runner-images#14748). Kept as-is deliberately:
+# the suite is pure-stdlib and platform-agnostic; pinning an image
+# would only add drift. Revisit only if a job fails on the new image.
 jobs:
   test:
     strategy:
