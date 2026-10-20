@@ -1006,6 +1006,17 @@ class Repo:
                 continue
             cached = cache.get(path)
             cached_mode = cached[2] if cached and len(cached) > 2 else None
+            # Stage 1 requires a regular-file cached mode: 0o777 is the
+            # symlink sentinel, and legacy 2-element entries have no mode
+            # at all. Either falling through to rehash is correct — a
+            # same-size/same-mtime file replacing a cached symlink must
+            # not pass the fast path (Windows carry-forward would return
+            # the sentinel as the disk mode and report clean).
+            if cached_mode not in (0o644, 0o755):
+                cached_mode = None
+                if path in head_manifest:
+                    suspect.append(path)
+                    continue
             disk_mode = _file_mode(fp, cached_mode)
             if (
                 cached

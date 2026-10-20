@@ -631,6 +631,41 @@ class TestTreeIdCollisions:
         assert t3 != t4
 
 
+class TestWindowsStatCache:
+    def test_replaced_symlink_not_clean_via_sentinel(self, project, monkeypatch):
+        """0o777 is the symlink sentinel in the stat cache. On Windows,
+        the carry-forward made _file_mode return the sentinel as the disk
+        mode, so a same-size/same-mtime regular file replacing a cached
+        symlink passed Stage 1 and status reported clean while the head
+        still held a symlink. Stage 1 must reject sentinel modes."""
+        import firnpack as fp
+
+        monkeypatch.setattr(fp, "_WINDOWS", True)
+        import json as _json
+        import os as _os
+        import sqlite3
+
+        write(project, "a.txt", "data\n")
+        (project / "link.txt").symlink_to("real1")  # target name: 5 bytes
+        repo = fp.Repo.init(project)
+        repo.commit("base")
+        repo.close()
+        (project / "link.txt").unlink()
+        (project / "link.txt").write_bytes(b"12345")  # content: 5 bytes
+        db = sqlite3.connect(project / ".firn" / "glacier.db")
+        cache = _json.loads(
+            db.execute("SELECT stat_cache FROM worktree WHERE id=1").fetchone()[0]
+        )
+        db.close()
+        mtime = cache["link.txt"][1]
+        _os.utime(project / "link.txt", ns=(mtime, mtime))
+        repo = fp.Repo.discover()
+        st = repo.status()
+        repo.close()
+        assert st["modified"] == ["link.txt"]
+        assert st["clean"] is False
+
+
 # ----------------------------------------------------- repo file invariant
 
 

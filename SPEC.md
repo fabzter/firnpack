@@ -298,10 +298,16 @@ contains, in this order:
     so `path ∥ NUL ∥ data` is unambiguous — `{"a": b"bc"}` and
     `{"ab": b"c"}` hashed identically without it (collision audit
     2026-10-20).
-  *Ignores* message/author/time → identical trees share a tree_id. Used
-  by: `status` (worktree.snapshot), merge (base/ours/theirs trees), and
-  the nothing-to-pack check.
-  **Owner decision 2026-10-20 (1a)**: the exec bit participates in
+  **Collision audit 2026-10-20 — kind byte + NUL separator: PROPOSED,
+  pending owner ratification.** The original 1a formula
+  (`path ∥ exec ∥ bytes`) had two ambiguities: the path/content boundary
+  and symlink-target vs file-content. The implementation uses the
+  formula above with regression tests pinning both collisions; the
+  amended formula awaits owner ratification (owner item (B2)). *Ignores*
+  message/author/time → identical trees share a tree_id. Used by:
+  `status` (worktree.snapshot), merge (base/ours/theirs trees), and the
+  nothing-to-pack check.
+  **Owner decision 2026-10-20 (1a, ratified)**: the exec bit participates in
   identity — mode-only changes (chmod ±x) are detectable drift, never
   silent divergence between disk and history. The stat cache stores the
   mode alongside size/mtime so `status` flags a chmod cheaply; the file
