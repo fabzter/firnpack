@@ -77,6 +77,11 @@ A **simple, decentralized-ish, single-user version control system** written as a
 6. **Second repo (agent skill)**: uses firnpack as a **git submodule**, shipping exactly
    two files: (a) a skill file documenting full usage of the VCS, (b) the Python code
    itself. Submodule chosen so skills can be installed directly from the repo.
+   (Ratified 2026-10-20: "two files" is the **install footprint** — what gets copied
+   into a skill directory. The repository itself follows SPEC §21: submodule +
+   `.gitmodules` + SKILL.md + byte-match-guarded `firnpack.py` copy + repo #2
+   drift-guard CI, plus a README; the submodule pin and the GitHub CI make
+   `.gitmodules` and a workflow file structural, not optional.)
 7. **Must support**: commit, amend, branching, branch-from-specific-commit, merging,
    history (log). Open question raised by user: *is anything else fundamental missing?*
    (Research answer: yes — diff/status/checkout/tag; see SPEC.)
