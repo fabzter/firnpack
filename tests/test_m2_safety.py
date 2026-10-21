@@ -377,6 +377,43 @@ class TestCompact:
         repo.close()
         assert st["clean"]
 
+    def test_compact_foundation_holds_the_cut_layers_bytes(self, project):
+        """The foundation must be a byte-exact copy of the cut layer's
+        tree. It used to be written from the WORKTREE (which sits at
+        HEAD): same-named files got HEAD's bytes — silent corruption of
+        the oldest history, invisible to verify — and a file present in
+        the cut but gone from the worktree crashed compact outright."""
+        repo = Repo.init(project)
+        write(project, "old_only.txt", "only in early history\n")
+        write(project, "a.txt", "v1\n")
+        repo.commit("c1")
+        write(project, "a.txt", "v2 longer content\n")
+        repo.commit("c2")
+        cut_id = repo._worktree()["head_id"]
+        cut_files = {
+            p: repo._layer_contents(cut_id, {p})[p]
+            for p, v in repo._read_layer(cut_id)[1].items()
+            if v["target"] is None
+        }
+        (project / "old_only.txt").unlink()
+        write(project, "b.txt", "new b\n")
+        repo.commit("c3")
+        write(project, "a.txt", "v4 final\n")
+        repo.commit("c4")
+        result = repo.compact(2, yes=True)
+        assert result["status"] == "compacted"
+        root_id = repo._db.execute(
+            "SELECT id FROM layers WHERE parent IS NULL"
+        ).fetchone()[0]
+        _, manifest, _ = repo._read_layer(root_id)
+        got = {
+            p: repo._layer_contents(root_id, {p})[p]
+            for p, v in manifest.items()
+            if v["target"] is None
+        }
+        repo.close()
+        assert got == cut_files
+
 
 def _fk_check(repo):
     return repo._db.execute("PRAGMA foreign_key_check").fetchall()

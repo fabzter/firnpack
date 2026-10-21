@@ -1917,15 +1917,20 @@ class Repo:
         fmeta = dict(foundation_record)
         fmeta["layer_id"] = foundation_id
         fmeta["profile"] = "gzip"
-        # copy the cut layer's bytes: the tree is identical; only the
-        # meta differs. Rebuild via _write_layer from the tree.
+        # the foundation's tree IS the cut layer's tree: copy it from
+        # the cut layer itself. _write_layer reads the WORKTREE (which
+        # sits at HEAD, not at the cut) — using it here crashed on any
+        # cut file missing from HEAD and silently gave same-named files
+        # HEAD's bytes in the oldest history.
         cut_files, cut_links = [], []
         for path, v in sorted(cut_manifest.items()):
             if v["target"] is not None:
                 cut_links.append(path)
             else:
                 cut_files.append(path)
-        fsize = self._write_layer(foundation_id, fmeta, cut_files, cut_links)
+        fsize = self._rewrite_layer_from(
+            cut_id, foundation_id, fmeta, cut_files, cut_links
+        )
 
         # rewrite every layer of the rewrite set onto the foundation:
         # the kept chain first (oldest first), then off-chain
