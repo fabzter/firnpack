@@ -1666,6 +1666,29 @@ class Repo:
         dry_run: bool = False,
         yes: bool = False,
     ) -> dict:
+        """Squash old layers, reclaim disk (SPEC 9.9). See _compact.
+
+        Wrapper guarantee: new layer files are written BEFORE the swap
+        transaction, so a failure anywhere after the first write must
+        not strand them — they have no database row, and an orphan
+        file fails `verify` while nothing else would ever sweep it."""
+        try:
+            return self._compact(
+                keep, archive_dir=archive_dir, dry_run=dry_run, yes=yes
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self._sweep_orphans()
+            raise
+
+    def _compact(
+        self,
+        keep: int,
+        *,
+        archive_dir: str | None = None,
+        dry_run: bool = False,
+        yes: bool = False,
+    ) -> dict:
         """Squash old layers, reclaim disk (SPEC 9.9 — owner-mandated,
         never automatic, explicit permission only).
 
@@ -1911,14 +1934,26 @@ class Repo:
         # reference resolvable as the walk runs
         remap = {cut_id: foundation_id}
         new_rows = []
-        order = list(reversed(kept))
-        placed = set(order) | {cut_id}
-        pending = rewrite_set - placed
+        # topological order over the WHOLE rewrite set (kept chain AND
+        # survivors together): a kept merge layer's second parent can be
+        # an off-chain survivor, which must be rewritten first or the
+        # merge would be re-parented onto an id that is about to be
+        # deleted. Parents/second parents outside the rewrite set are
+        # either the cut (remapped to the foundation) or untouched.
+        order: list[str] = []
+        placed = {cut_id}
+        pending = set(rewrite_set)
         while pending:
             progressed = False
-            for lid in sorted(pending):
+            for lid in sorted(
+                pending, key=lambda x: chain.index(x) if x in chain else -1
+            ):
                 p, s = all_rows[lid]
-                if p in placed and (s is None or s in placed):
+                ready = all(
+                    ref is None or ref in placed or ref not in rewrite_set
+                    for ref in (p, s)
+                )
+                if ready:
                     order.append(lid)
                     placed.add(lid)
                     pending.discard(lid)

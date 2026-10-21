@@ -649,3 +649,86 @@ class TestCompactRefs:
         assert _fk_check(repo) == []
         assert repo.verify()["status"] == "ok"
         repo.close()
+
+    @pytest.mark.parametrize("delete_feature", [True, False])
+    def test_compact_rewrites_kept_merge_stub_before_the_merge(
+        self, project, delete_feature
+    ):
+        """A kept merge layer references its second parent, an off-chain
+        survivor that is itself rewritten. The survivor must be placed
+        BEFORE the merge: otherwise the rewritten merge points at an id
+        about to be deleted and the swap dies on FOREIGN KEY at COMMIT
+        (adversarial review: keep=6 over a merge-bearing chain)."""
+        repo = Repo.init(project)
+        write(project, "c0.txt", "0\n")
+        repo.commit("c0")
+        write(project, "c1.txt", "1\n")
+        repo.commit("c1")
+        repo.branch("feature")
+        repo.switch("feature")
+        write(project, "x1.txt", "x\n")
+        repo.commit("x1")
+        repo.switch("main")
+        write(project, "c2.txt", "2\n")
+        repo.commit("c2")
+        assert repo.merge("feature")["status"] == "merged"
+        for i in (3, 4, 5):
+            write(project, f"c{i}.txt", f"{i}\n")
+            repo.commit(f"c{i}")
+        if delete_feature:
+            _delete_branch(repo, "feature")
+        names = [n for (n,) in repo._db.execute("SELECT name FROM branches")]
+        before = {
+            n: repo._read_layer(
+                repo._db.execute(
+                    "SELECT head FROM branches WHERE name = ?", (n,)
+                ).fetchone()[0]
+            )[1]
+            for n in names
+        }
+        # chain: c5 c4 c3 merge c2 c1 c0 -> keep 6 puts the cut on c0
+        result = repo.compact(6, yes=True)
+        assert result["status"] == "compacted"
+        assert _fk_check(repo) == []
+        assert repo.verify()["status"] == "ok"
+        rows = repo._db.execute("SELECT count(*) FROM layers").fetchone()[0]
+        files = len(list((project / ".firn" / "layers").glob("*.firn")))
+        assert files == rows
+        for n in names:
+            head = repo._db.execute(
+                "SELECT head FROM branches WHERE name = ?", (n,)
+            ).fetchone()[0]
+            assert repo._read_layer(head)[1] == before[n]
+        if not delete_feature:
+            merge_second = repo._db.execute(
+                "SELECT second_parent FROM layers WHERE message = 'merge feature'"
+            ).fetchone()[0]
+            feature_head = repo._db.execute(
+                "SELECT head FROM branches WHERE name = 'feature'"
+            ).fetchone()[0]
+            assert merge_second == feature_head  # one rewritten stub, shared
+        repo.close()
+
+    def test_compact_failure_leaves_no_orphan_layer_files(self, project, monkeypatch):
+        """New layer files are written before the swap transaction; a
+        failure anywhere after the first write must not strand them
+        (verify would then report orphan files and nothing sweeps them)."""
+        repo = Repo.init(project)
+        _chain(repo, 5)
+        layers = project / ".firn" / "layers"
+        files_before = sorted(p.name for p in layers.glob("*.firn"))
+        real = Repo._rewrite_layer_from
+        calls = {"n": 0}
+
+        def flaky(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("disk exploded")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Repo, "_rewrite_layer_from", flaky)
+        with pytest.raises(RuntimeError, match="disk exploded"):
+            repo.compact(3, yes=True)
+        assert sorted(p.name for p in layers.glob("*.firn")) == files_before
+        assert repo.verify()["status"] == "ok"
+        repo.close()
