@@ -29,6 +29,7 @@ import sys
 import tarfile
 import time
 import zipfile
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -333,6 +334,22 @@ def _validate_member_names(names: list[str]) -> None:
                 raise IntegrityError(f"reserved device name: {name!r}")
 
 
+def _check_storable(files, symlinks) -> None:
+    """Refuse, at COMMIT, any name the read side would refuse later.
+
+    Shares _validate_member_names so commit and read cannot disagree. Used
+    by both layer writers (_write_layer for commit, _rewrite_layer_from for
+    amend). A name rejected here used to pack fine and then wedge
+    status/verify/export/restore on the committed-but-unreadable layer.
+    """
+    try:
+        _validate_member_names(sorted({*files, *symlinks}))
+    except IntegrityError as exc:
+        raise FirnpackError(
+            f"cannot store {exc.args[0]}; rename the file and try again"
+        ) from None
+
+
 def _validate_member_types(members) -> None:
     """Structural member allowlist (SPEC §5 layer 2)."""
     allowed = {tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.SYMTYPE, tarfile.DIRTYPE}
@@ -342,6 +359,34 @@ def _validate_member_types(members) -> None:
                 f"layer contains a {m.type!r} member ({m.name!r}); "
                 f"hardlinks and special members are not valid in firnpack layers"
             )
+
+
+# Errors that mean "this layer's bytes are damaged or not a tar.gz at all":
+# gzip/zlib faults, a truncated stream (EOFError), tar header faults, and
+# OS-level read failures. All of them must surface as IntegrityError
+# (exit 3), never as a raw traceback.
+_LAYER_DECODE_ERRORS = (tarfile.TarError, zlib.error, EOFError, OSError, ValueError)
+
+
+def _open_layer(path: Path, layer_id: str) -> tarfile.TarFile:
+    """Open a layer as tar.gz, mapping open-time damage to IntegrityError."""
+    try:
+        return tarfile.open(path, "r:gz")  # noqa: SIM115
+    except _LAYER_DECODE_ERRORS as exc:
+        raise IntegrityError(f"cannot open layer {layer_id}: {exc}") from None
+
+
+def _drain_layer(tar: tarfile.TarFile) -> None:
+    """Read the gzip stream to its end so the CRC/ISIZE trailer is checked.
+
+    tarfile stops at the end-of-archive marker and never reads the 8-byte
+    gzip trailer, so a flipped byte in CRC32/ISIZE would otherwise pass.
+    """
+    fileobj = tar.fileobj
+    if fileobj is None:
+        return
+    while fileobj.read(1 << 16):
+        pass
 
 
 # ---------------------------------------------------------------- hashing
@@ -512,13 +557,16 @@ def _layer_id(record: dict) -> str:
 class Repo:
     """The firnpack repository API. The CLI is a thin wrapper over this."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, recovering: bool = False):
         self.root = root.resolve()
         self.firn = self.root / FIRN_DIR
-        if not (self.firn / "glacier.db").is_file():
+        if not (self.firn / "glacier.db").is_file() and not recovering:
+            # the repo exists (its .firn/ is here) but its index is gone:
+            # point at the rebuild, never at 'init' (which would refuse)
             raise NotARepoError(
-                f"not a firnpack repository: {self.root} (no .firn/ found; "
-                f"run 'firnpack init' first)"
+                f"glacier.db is missing in {self.firn}; run "
+                f"'firnpack verify --rebuild-db' to rebuild the index from "
+                f"the layers"
             )
         self.layers_dir = self.firn / "layers"
         self._db = self._connect()
@@ -527,11 +575,13 @@ class Repo:
     # -- lifecycle helpers
 
     @staticmethod
-    def discover(start: Path | None = None) -> Repo:
+    def discover(start: Path | None = None, *, recovering: bool = False) -> Repo:
+        # the nearest .firn/ directory is the repository, even when its
+        # glacier.db is missing: never walk past it into an outer repo
         cur = (start or Path.cwd()).resolve()
         for candidate in [cur, *cur.parents]:
-            if (candidate / FIRN_DIR / "glacier.db").is_file():
-                return Repo(candidate)
+            if (candidate / FIRN_DIR).is_dir():
+                return Repo(candidate, recovering=recovering)
         raise NotARepoError(
             "not a firnpack repository (walked up from "
             f"{cur}; run 'firnpack init' first)"
@@ -551,9 +601,23 @@ class Repo:
                         f"corrupted — try again shortly."
                     ) from None
                 time.sleep(0.5)
-        conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute("PRAGMA synchronous=FULL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.OperationalError:
+            # lock contention is transient (rc 1, retry); let it propagate
+            conn.close()
+            raise
+        except sqlite3.DatabaseError as exc:
+            # the file is not a SQLite database (or is damaged): this is
+            # store damage, not a usage error — rc 3, one humane line
+            conn.close()
+            raise IntegrityError(
+                f"glacier.db is not a readable firnpack database ({exc}); "
+                f"run 'firnpack verify --rebuild-db' to rebuild the index "
+                f"from the layers"
+            ) from None
         return conn
 
     def _load_config(self) -> configparser.ConfigParser:
@@ -754,8 +818,11 @@ class Repo:
     def _write_layer(self, layer_id: str, meta: dict, files, symlinks) -> int:
         """Canonical tar -> gzip -> atomic durable write (SPEC §13).
 
-        Returns the compressed size on disk.
+        Returns the compressed size on disk. Names the read side would
+        refuse are rejected here first (see _check_storable): nothing is
+        written, so the repo stays readable.
         """
+        _check_storable(files, symlinks)
         tmp = self.layers_dir / f"{layer_id}.firn.tmp"
         meta_bytes = _canonical_json(meta)
         # Windows carry-forward: load the head manifest ONCE (the caller
@@ -818,53 +885,78 @@ class Repo:
         if not path.is_file():
             raise IntegrityError(f"missing layer file: {path.name}")
         _warn_patch_level_once()
-        try:
-            tar = tarfile.open(path, "r:gz")  # noqa: SIM115
-        except (tarfile.TarError, OSError) as exc:
-            raise IntegrityError(f"cannot open layer {layer_id}: {exc}") from None
-        with tar:
-            members = tar.getmembers()
-            _validate_member_types(members)
-            _validate_member_names([m.name for m in members])
-            meta = None
-            manifest, contents = {}, {}
-            for m in members:
-                if m.name == META_MEMBER:
-                    if m.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
-                        raise IntegrityError("corrupt meta member")
-                    meta = json.loads(tar.extractfile(m).read().decode("utf-8"))
-                    continue
-                if m.type == tarfile.DIRTYPE:
-                    continue
-                if m.type == tarfile.SYMTYPE:
-                    manifest[m.name] = {
-                        "size": 0,
-                        "mode": m.mode,
-                        "target": m.linkname,
-                    }
-                else:
-                    manifest[m.name] = {
-                        "size": m.size,
-                        "mode": m.mode,
-                        "target": None,
-                    }
-            if meta is None:
-                raise IntegrityError(f"layer {layer_id} has no meta member")
-            return meta, manifest, contents
+        with _open_layer(path, layer_id) as tar:
+            try:
+                members = tar.getmembers()
+                _validate_member_types(members)
+                _validate_member_names([m.name for m in members])
+                meta = None
+                manifest, contents = {}, {}
+                seen = set()
+                for m in members:
+                    if m.name in seen:
+                        raise IntegrityError(
+                            f"layer {layer_id} has a duplicate member {m.name!r}; "
+                            "extraction would keep only one of them"
+                        )
+                    seen.add(m.name)
+                    if m.name == META_MEMBER:
+                        if m.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                            raise IntegrityError("corrupt meta member")
+                        meta = json.loads(tar.extractfile(m).read().decode("utf-8"))
+                        continue
+                    if m.type == tarfile.DIRTYPE:
+                        continue
+                    if m.type == tarfile.SYMTYPE:
+                        manifest[m.name] = {
+                            "size": 0,
+                            "mode": m.mode,
+                            "target": m.linkname,
+                        }
+                    else:
+                        data = tar.extractfile(m).read()
+                        manifest[m.name] = {
+                            "size": m.size,
+                            "mode": m.mode,
+                            "target": None,
+                        }
+                        contents[m.name] = data
+                _drain_layer(tar)
+                # a member may not sit beneath a non-directory member: the
+                # extractor would write through a symlink (d -> ../outside)
+                # or fail mid-write (f0.txt is a file, f0.txt/inner.txt
+                # cannot exist)
+                for name in manifest:
+                    parts = name.split("/")
+                    for i in range(1, len(parts)):
+                        ancestor = "/".join(parts[:i])
+                        if ancestor in manifest:
+                            raise IntegrityError(
+                                f"layer {layer_id}: {name!r} lies beneath "
+                                f"{ancestor!r}, which is not a directory"
+                            )
+            except _LAYER_DECODE_ERRORS as exc:
+                raise IntegrityError(f"layer {layer_id} is damaged: {exc}") from None
+        if meta is None:
+            raise IntegrityError(f"layer {layer_id} has no meta member")
+        return meta, manifest, contents
 
     def _layer_contents(self, layer_id: str, wanted: set[str]) -> dict:
         """Read only the requested regular-file members from a layer."""
         path = self._layer_path(layer_id)
         _warn_patch_level_once()
-        try:
-            tar = tarfile.open(path, "r:gz")  # noqa: SIM115
-        except (tarfile.TarError, OSError) as exc:
-            raise IntegrityError(f"cannot open layer {layer_id}: {exc}") from None
         out = {}
-        with tar:
-            for m in tar.getmembers():
-                if m.name in wanted and m.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
-                    out[m.name] = tar.extractfile(m).read()
+        with _open_layer(path, layer_id) as tar:
+            try:
+                for m in tar.getmembers():
+                    if m.name in wanted and m.type in (
+                        tarfile.REGTYPE,
+                        tarfile.AREGTYPE,
+                    ):
+                        out[m.name] = tar.extractfile(m).read()
+                _drain_layer(tar)
+            except _LAYER_DECODE_ERRORS as exc:
+                raise IntegrityError(f"layer {layer_id} is damaged: {exc}") from None
         return out
 
     # -- merge machinery (SPEC §10/§11)
@@ -1500,11 +1592,11 @@ class Repo:
                 problems.append(f"missing layer file: {layer_id}")
                 continue
             try:
-                meta, manifest, _ = self._read_layer(layer_id)
+                meta, manifest, contents = self._read_layer(layer_id)
             except IntegrityError as exc:
                 problems.append(f"layer {layer_id}: {exc}")
                 continue
-            # rebuild the canonical record and re-hash
+            # rebuild the canonical record and re-hash the layer's own meta
             record = {
                 "format_version": FORMAT_VERSION,
                 "tree_id": meta["tree_id"],
@@ -1519,8 +1611,38 @@ class Repo:
                     f"layer {layer_id}: id mismatch (meta does not hash "
                     f"to the filename)"
                 )
-            if meta["tree_id"] != tree_id:
-                problems.append(f"layer {layer_id}: tree_id mismatch (DB vs meta)")
+            # re-hash the file content: the tree id must equal the hash of
+            # the bytes actually stored, not just the value the meta claims
+            entries = {}
+            for p, v in manifest.items():
+                if v["target"] is not None:
+                    target = v["target"]
+                    entries[p] = (len(target.encode("utf-8")), None, target, False)
+                else:
+                    data = contents[p]
+                    entries[p] = (
+                        len(data),
+                        data,
+                        None,
+                        v["mode"] == 0o755,
+                    )
+            if _hash_tree(entries) != meta["tree_id"]:
+                problems.append(
+                    f"layer {layer_id}: tree_id mismatch (stored bytes do not "
+                    f"hash to the recorded tree)"
+                )
+            # the DB row duplicates the meta record; every column must agree
+            db_row = {
+                "tree_id": tree_id,
+                "parent": parent,
+                "second_parent": second,
+                "message": _message,
+                "author": _author,
+                "created_at": _created,
+            }
+            for column, value in db_row.items():
+                if value != meta[column]:
+                    problems.append(f"layer {layer_id}: {column} mismatch (DB vs meta)")
             if parent is not None and parent not in known:
                 problems.append(f"layer {layer_id}: dangling parent {parent}")
             if second is not None and second not in known:
@@ -1554,6 +1676,11 @@ class Repo:
         re-schematized in place; a database file sqlite cannot open
         at all, or a missing one, must be replaced by an empty file
         first (storage.md §6.4)."""
+        # snapshot the branch names BEFORE the schema heals an empty file:
+        # a missing/empty database has no names to read, so unknowable
+        pre_branches: list[str] | None = None
+        with contextlib.suppress(sqlite3.Error):
+            pre_branches = [n for (n,) in self._db.execute("SELECT name FROM branches")]
         self._db.executescript(SCHEMA)  # idempotent: heals empty/corrupt-empty files
         rows = []
         for path in sorted(self.layers_dir.glob("*.firn")):
@@ -1597,12 +1724,9 @@ class Repo:
                 + ", ".join(m[:12] for m in missing)
                 + " — restore them first (storage.md §6)"
             )
-        lost_branches: list[str] = []
-        with contextlib.suppress(sqlite3.Error):
-            # unreadable branches table: nothing to report as lost
-            lost_branches = [
-                n for (n,) in self._db.execute("SELECT name FROM branches")
-            ]
+        # None = unknowable (missing/empty/unreadable database: no branch
+        # names to read) — distinct from [] (a readable table, none lost)
+        lost_branches: list[str] | None = pre_branches
         head_id = head_tree = None
         if rows:
             # newest TIP layer: one no other layer descends from.
@@ -1633,7 +1757,8 @@ class Repo:
                     "VALUES ('main', ?, ?)",
                     (head_id, _utcnow()),
                 )
-                lost_branches = [b for b in lost_branches if b != "main"]
+                if lost_branches is not None:
+                    lost_branches = [b for b in lost_branches if b != "main"]
                 self._db.execute(
                     "INSERT INTO worktree (id, head_kind, head_branch, "
                     "head_pin, head_id, snapshot, stat_cache, "
@@ -1655,7 +1780,9 @@ class Repo:
             "status": "rebuilt",
             "layers": len(rows),
             "main_head": head_id,
-            "lost_branches": sorted(lost_branches),
+            "lost_branches": (
+                sorted(lost_branches) if lost_branches is not None else None
+            ),
         }
 
     def compact(
@@ -1672,13 +1799,15 @@ class Repo:
         transaction, so a failure anywhere after the first write must
         not strand them — they have no database row, and an orphan
         file fails `verify` while nothing else would ever sweep it."""
+        self._compact_wrote = False
         try:
             return self._compact(
                 keep, archive_dir=archive_dir, dry_run=dry_run, yes=yes
             )
         except BaseException:
-            with contextlib.suppress(Exception):
-                self._sweep_orphans()
+            if self._compact_wrote:
+                with contextlib.suppress(Exception):
+                    self._sweep_orphans()
             raise
 
     def _compact(
@@ -1701,7 +1830,9 @@ class Repo:
         Refusals (a history rewrite checks first): pending merge; any
         other branch head or pin reaching into the collapsed set; a
         kept merge layer whose second_parent reaches below the cut.
-        --keep 1 always works (the deep clean).
+        A kept merge whose second parent is collapsed is refused, so
+        --keep 1 is the deep clean only when no kept merge reaches below
+        the cut; otherwise raise --keep until that second parent is kept.
 
         Crash ordering: archive first, then write ALL new layers, then
         ONE DB transaction, then delete old files (both crash windows
@@ -1770,9 +1901,9 @@ class Repo:
             second = all_rows[lid][1]
             if second is not None and second in collapsed:
                 raise FirnpackError(
-                    f"kept layer {lid[:12]} is a merge whose "
-                    f"second_parent falls below the cut — raising --keep "
-                    f"or using --keep 1 keeps the merge structure"
+                    f"kept layer {lid[:12]} is a merge whose second parent "
+                    f"{second[:12]} falls below the cut — raise --keep so the "
+                    f"second parent is kept too"
                 )
         # live roots in old-row space: branch heads outside the
         # deleted set, plus kept merges' second parents (rewritten
@@ -1799,14 +1930,18 @@ class Repo:
             p, s = all_rows[rid]
             if p in collapsed or s in collapsed:
                 who = head_names.get(rid)
-                detail = (
-                    f"branch {who!r} descends from layers that would be collapsed"
-                    if who
-                    else f"layer {rid[:12]} is still referenced, but "
-                    f"its ancestry reaches into the collapsed range"
-                )
+                if who:
+                    raise FirnpackError(
+                        f"branch {who!r} descends from layers that would be "
+                        f"collapsed — raise --keep, or merge/delete the branch first"
+                    )
+                # no branch points here: the reference is structural (a
+                # merge edge or a surviving fork). Deleting a branch cannot
+                # clear it, so do not advise that.
                 raise FirnpackError(
-                    f"{detail} — raise --keep, or merge/delete the branch first"
+                    f"layer {rid[:12]} is still referenced, but its ancestry "
+                    f"reaches into the collapsed range — raise --keep "
+                    f"(a merge edge is cleared only by a higher --keep)"
                 )
         # garbage: UNREACHABLE rows referencing anything that vanishes
         # (deleted chain rows or rewritten survivors) or already-
@@ -1928,6 +2063,7 @@ class Repo:
                 cut_links.append(path)
             else:
                 cut_files.append(path)
+        self._compact_wrote = True
         fsize = self._rewrite_layer_from(
             cut_id, foundation_id, fmeta, cut_files, cut_links
         )
@@ -2121,6 +2257,7 @@ class Repo:
         """Write a new layer whose tree equals an existing layer's,
         with new meta. Reads content from the OLD layer, not the
         worktree."""
+        _check_storable(files, links)
         manifest = self._read_layer(old_id)[1]
         regular = {p for p, v in manifest.items() if v["target"] is None}
         contents = self._layer_contents(old_id, regular)
@@ -2784,7 +2921,7 @@ def _cmd_export(args) -> int:
 
 
 def _cmd_verify(args) -> int:
-    repo = Repo.discover()
+    repo = Repo.discover(recovering=bool(args.rebuild_db))
     try:
         if args.rebuild_db:
             rebuilt = repo.rebuild_db()
@@ -2797,10 +2934,15 @@ def _cmd_verify(args) -> int:
                 f"rebuilt database from {rebuilt['layers']} layer(s); "
                 f"main at {head[:12] if head else '(no layers)'}"
             )
-            if rebuilt["lost_branches"]:
+            lost = rebuilt["lost_branches"]
+            if lost is None:
                 print(
-                    "lost (branch names live only in the database): "
-                    + ", ".join(rebuilt["lost_branches"])
+                    "lost branches: unknown — the database was missing or "
+                    "empty, so branch names could not be recovered"
+                )
+            elif lost:
+                print(
+                    "lost (branch names live only in the database): " + ", ".join(lost)
                 )
             print(
                 f"verify ok — {verify_result['layers']} layers re-hashed and consistent"

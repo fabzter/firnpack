@@ -35,7 +35,7 @@ These never mutate the repository or worktree, in any state:
 | drift guard | 1 | message names drift / "uncommitted" | commit, restore, or export the drift first; never discard on a user's behalf |
 | pending-merge guard | 1 | "merge is pending" | resolve markers + `commit`, or `merge --abort` |
 | merge conflict | 1 | JSON `status: "conflict"` with `conflicts: [paths]` | edit markers, then `commit` (records both parents); or `--abort` |
-| compact refusal | 1 | message names a branch or the pin, or the kept-merge condition | raise `--keep`, or merge/delete the named branch; re-plan |
+| compact refusal | 1 | message names a branch (merge/delete it, or raise `--keep`), or "still referenced" with no branch (a merge edge: raise `--keep` only; deleting a branch cannot clear it), or the kept-merge second-parent condition | raise `--keep`; delete the named branch only when the message names one; re-plan |
 | permission refusal | 1 | "pass --yes", "--keep must be" | stop; obtain explicit human parameters |
 | integrity failure | 3 | `firnpack: integrity failure:` + problem list | stop writes; run `verify`; follow `storage.md` recovery |
 | usage error | 2 | argparse text | fix the invocation |

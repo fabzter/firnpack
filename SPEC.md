@@ -790,8 +790,9 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   3. the pin resolves into the collapsed set;
   4. the kept range contains a merge layer whose `second_parent` reaches
      below the cut (re-pointing it would invent history — refuse, or
-     choose a higher cutoff; `--keep 1` always works and is the
-     recommended deep-clean).
+     choose a higher cutoff that keeps the second parent). `--keep 1` is
+     the recommended deep-clean only when no kept merge reaches below the
+     cut; it does not clear a merge edge that is kept.
   **Rewrite closure and remap (owner item (a), 2026-10-20)**: the
   rewrite is not chain-only. Every reachable survivor whose deleted-set
   references all land in KEPT rows — a working branch forked from the
@@ -841,9 +842,10 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   half-compact.
 - **Merge constraint (v1 honesty)**: if the kept range contains merge
   layers whose `second_parent` reaches below the cut, compact **refuses**
-  (the rewrite would orphan merge structure). `--keep 1` — squash
-  everything into a single layer — always works and is the recommended
-  deep-clean.
+  (the rewrite would orphan merge structure). Raise `--keep` until the
+  merge's second parent is inside the kept range; `--keep 1` — squash
+  everything into a single layer — is the recommended deep-clean only
+  when no kept merge reaches below the cut.
 - **Reachability-safe deletion**: a layer file is deleted only when it is
   unreachable after the rewrite — from **every** branch head, pin, and
   kept merge edge. A branch still pointing at a kept layer follows the
