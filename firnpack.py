@@ -343,6 +343,8 @@ def _check_storable(files, symlinks) -> None:
     status/verify/export/restore on the committed-but-unreadable layer.
     """
     try:
+        if META_MEMBER in (*files, *symlinks):
+            raise IntegrityError(f"reserved member name: {META_MEMBER!r}")
         _validate_member_names(sorted({*files, *symlinks}))
     except IntegrityError as exc:
         raise FirnpackError(

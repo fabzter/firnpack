@@ -248,7 +248,15 @@ class TestCommitRefusesUnstorableNames:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only filenames")
     @pytest.mark.parametrize(
-        "name", ["a\\b.txt", "con.txt", "c:notes.txt", "dir/aux", "x/nul.log"]
+        "name",
+        [
+            "a\\b.txt",
+            "con.txt",
+            "c:notes.txt",
+            "dir/aux",
+            "x/nul.log",
+            "__firnpack_meta__",
+        ],
     )
     def test_commit_refuses_and_leaves_the_repo_usable(self, project, name):
         repo, ids = _make(project, 1)
