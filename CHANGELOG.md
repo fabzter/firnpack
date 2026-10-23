@@ -2,10 +2,7 @@
 
 Hand-maintained (SPEC §24). Semver; releases on `v*` tags.
 
-## Unreleased
-
-Planned as 1.0.1 (owner decision 2026-10-22). The version is not bumped and
-nothing is tagged or published yet.
+## 1.0.1 — 2026-10-23
 
 ### Changed behavior
 

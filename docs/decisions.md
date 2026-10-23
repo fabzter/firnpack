@@ -194,15 +194,16 @@ Pointer: SPEC §9.7.
 ## D-23 — Keep the named publishing environment (2026-10-23, owner-resolved)
 
 Keep `environment: pypi` in the release workflow alongside its test,
-tag/version and artifact gates. This retains the local workflow change;
-it does not authorize a push, version bump, tag or publish.
+tag/version and artifact gates. Publication of the agreed releases and
+matching companion updates is owner-authorized (2026-10-23); this does
+not change the in-tool permission rules for project-data operations.
 
 Read-only deployment check, 2026-10-23:
 `gh api repos/fabzter/firnpack/environments --jq '{total_count, names:
 [.environments[].name]}'` returned `{"names": [], "total_count": 0}`.
-The named environment does not exist yet, so no environment protection
-rules are configured. The PyPI trusted-publisher binding has not been
-revalidated. No remote configuration was changed.
+At that pre-release check the named environment did not exist, so no
+environment protection rules were configured. The PyPI trusted-publisher
+binding had not been revalidated. That check changed no remote configuration.
 
 ## Open (not settled)
 

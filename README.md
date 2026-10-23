@@ -18,10 +18,6 @@ holds 102 files. That's the whole design.
 
 ## Install
 
-These docs track the repository source, including fixes planned for 1.0.1
-in [Unreleased](CHANGELOG.md#unreleased). The published 1.0.0 package does
-not include those fixes yet.
-
 Requires Python 3.13.16 or newer.
 
 ```

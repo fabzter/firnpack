@@ -33,7 +33,7 @@ import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 FIRN_DIR = ".firn"
 META_MEMBER = "__firnpack_meta__"
