@@ -166,13 +166,17 @@ firnpack/
       compact) plus `verify --rebuild-db`; full suite green (unit + property
       + seeded fuzz + e2e CLI + docs/guard suites), ruff clean
 - [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main;
-      release.yml (trusted publishing) fired: **v1.0.0 on PyPI**
-      (2026-10-20; published artifact re-verified by clean install)
+      release.yml (test + artifact gates + trusted publishing) passed:
+      **v1.0.1 on PyPI** (2026-10-23). Published wheel/sdist engine
+      bytes match the tag; clean installs on Python 3.13.16 and 3.14.7
+      passed both CLI aliases and the recovery/guard smoke scenarios.
 - [x] README upgrade + docs/ tree (SPEC §20) — shipped with the
       JSON-contract guard suite
 - [x] Skill repo — github.com/fabzter/agent-skills-firnpack (public):
       SKILL.md + byte-match-guarded firnpack.py copy, submodule pinned
-      at v1.0.0, CI runs the engine suite against the copy
+      at v1.0.1; 49 skill-contract checks and the full engine suite
+      pass against the copy (518 passed, 2 platform-specific skips
+      locally on Python 3.13.16).
 
 ## 9. Working rules for agents in this repo
 
@@ -181,6 +185,12 @@ firnpack/
 - **No new runtime dependencies** without owner sign-off (G5: stdlib-only).
 - **Spec changes go through the owner review loop** — never mark a section
   settled that the owner hasn't ratified.
+- **Routine publication is pre-authorized** within the agreed goals
+  (owner, 2026-10-23): push, the agreed version bump, tag, release,
+  and matching companion updates need no further approval gate.
+  New product/security policy, visibility, or destructive-history
+  scope still requires an owner decision. This does not waive
+  permission rules for operations on a user's project data.
 - **Docs ship with behavior**: every documented JSON shape is a test contract;
   docs and code change together.
 - **File edits use `read`/`edit`/`write` tools** — no scripted bulk edits via
@@ -203,6 +213,6 @@ firnpack/
   normative operator documents. When in doubt: attribution =
   forbidden, operation = permitted.
 
-Last updated: 2026-10-20 — drafted during the founding session; kept current
-through the spec review close (v0.13), the v0.14 amendments, M2 completion,
-and the v1.0.0 release (PyPI live, skill repo published).
+Last updated: 2026-10-23 — through the spec review close, v0.14
+amendments, M2 completion, and the v1.0.1 safety fixes, verified PyPI
+publication and matching skill update.

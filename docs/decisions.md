@@ -205,6 +205,19 @@ At that pre-release check the named environment did not exist, so no
 environment protection rules were configured. The PyPI trusted-publisher
 binding had not been revalidated. That check changed no remote configuration.
 
+Post-release check, 2026-10-23: release run
+[`40000652213`](https://github.com/fabzter/firnpack/actions/runs/40000652213)
+completed successfully, including trusted publication of `v1.0.1`.
+`gh api repos/fabzter/firnpack/environments/pypi --jq
+'{name, protection_rules, deployment_branch_policy}'` returned
+`{"name":"pypi","protection_rules":[],"deployment_branch_policy":null}`:
+the named environment now exists, without configured protection rules.
+No protection policy was added as part of this release.
+The published wheel and source archive from PyPI contain engine bytes
+identical to the tag; clean PyPI installs on Python 3.13.16 and 3.14.7
+passed both CLI aliases, restore/rescue, destination protection, marker
+refusals and integrity verification.
+
 ## Open (not settled)
 
 - **O-02 — tags** (refs table reserved), **per-path restore**, rename
