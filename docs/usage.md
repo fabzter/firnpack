@@ -299,7 +299,9 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes] [--json]
 
 Squashes everything below the newest N layers of the current head's
 first-parent chain into one foundation layer and reclaims disk. `--keep` is
-required (no default exists or may be added); `--yes` is required for real
+required (no default exists or may be added) and must be at least 1 — `0`
+or a negative number is refused (exit 1, nothing touched), in every mode;
+a non-number is a usage error (exit 2). `--yes` is required for real
 runs; `--dry-run` plans without mutating.
 
 Rewrites, reports and guards (all visible, never silent):

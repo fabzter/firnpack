@@ -303,6 +303,23 @@ class TestCompact:
         msgs = [c["message"] for c in h["commits"]]
         assert "c5" in msgs and "c4" in msgs and "c3" in msgs
 
+    @pytest.mark.parametrize("keep", [0, -1])
+    @pytest.mark.parametrize("flags", [{}, {"yes": True}, {"dry_run": True}])
+    def test_compact_keep_below_one_refuses_and_changes_nothing(
+        self, project, keep, flags
+    ):
+        """`--keep` is the number of layers to keep above the foundation, so
+        0 (or less) would mean "keep nothing", which no command promises:
+        refuse in every mode, exit-1 style, with the layers directory
+        byte-identical (docs/usage.md)."""
+        repo = self._repo_with_chain(project)
+        layers = project / ".firn" / "layers"
+        before = {p.name: p.read_bytes() for p in layers.iterdir()}
+        with pytest.raises(FirnpackError, match="--keep must be >= 1"):
+            repo.compact(keep, **flags)
+        repo.close()
+        assert {p.name: p.read_bytes() for p in layers.iterdir()} == before
+
     def test_compact_refuses_without_yes(self, project):
         repo = self._repo_with_chain(project)
         with pytest.raises(FirnpackError, match="--yes"):
