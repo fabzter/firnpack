@@ -37,6 +37,9 @@ __version__ = "1.0.0"
 
 FIRN_DIR = ".firn"
 META_MEMBER = "__firnpack_meta__"
+# a conflict marker line: starts a line (after \n, \r\n or \r, or at the
+# start of the file) with seven < or > characters (SPEC §11)
+_MARKER_LINE = re.compile(rb"(?:\A|[\r\n])(?:<<<<<<<|>>>>>>>)")
 FORMAT_VERSION = 1
 GZIP_LEVEL = 6
 MAX_PATH_WARN = 240
@@ -134,6 +137,15 @@ class MergeConflict(FirnpackError):
         super().__init__(f"{what}: {', '.join(paths)}")
 
 
+class BinaryConflict(FirnpackError):
+    """A merge left a binary file undecided and the commit would keep only
+    OUR version (owner decision 2026-10-23: refuse until the user acts)."""
+
+    def __init__(self, paths):
+        self.paths = paths
+        super().__init__(f"undecided binary conflict in: {', '.join(paths)}")
+
+
 class IntegrityError(FirnpackError):
     """Repository integrity failure (exit code 3)."""
 
@@ -204,9 +216,7 @@ def _symlink(fp: Path, target: str) -> None:
             f"cannot create the symbolic link {fp.name!r} -> {target!r}: "
             f"{reason}. On Windows this needs Developer Mode (Settings → "
             f"Privacy & security → For developers) or an administrator "
-            f"account; otherwise use a machine that allows symbolic links. "
-            f"Your history was not changed; 'firnpack status' shows which "
-            f"files were already written."
+            f"account; otherwise use a machine that allows symbolic links."
         ) from None
 
 
@@ -648,14 +658,15 @@ class Repo:
             # store damage, not a usage error — rc 3, one humane line
             conn.close()
             raise IntegrityError(
-                f"glacier.db is not a readable firnpack database ({exc}); "
-                f"run 'firnpack verify --rebuild-db' to rebuild the index "
+                f"glacier.db is not a readable firnpack database ({exc}). "
+                f"Save a copy, replace it with an empty file, then run "
+                f"'firnpack verify --rebuild-db' to rebuild the index "
                 f"from the layers"
             ) from None
         return conn
 
     def _load_config(self) -> configparser.ConfigParser:
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.read_dict(
             {
                 "user": {"name": getpass.getuser()},
@@ -668,23 +679,29 @@ class Repo:
         # platform (the locale default would garble a non-ASCII author name)
         path = self.firn / "config"
         try:
-            cfg.read(path, encoding="utf-8")
+            read = cfg.read(path, encoding="utf-8")
         except (configparser.Error, UnicodeError) as exc:
             raise FirnpackError(
                 f"cannot read {path}: {exc}. Fix the file, or delete it to "
                 f"fall back to the defaults."
             ) from None
-        self._validate_config(cfg, path)
+        if not read and path.exists():
+            # configparser skips an unreadable file without a word; a user
+            # who set block_unresolved_markers = false must not silently
+            # lose that choice
+            print(
+                f"warning: could not read {path}; using the default settings "
+                f"until it is readable again",
+                file=sys.stderr,
+            )
         return cfg
 
     @staticmethod
     def _validate_config(cfg: configparser.ConfigParser, path: Path) -> None:
-        """Reject a wrong-typed value when the repository is OPENED.
-
-        A bad `reminder_threshold` used to blow up inside commit() after the
-        layer was already written (the command reported failure while the
-        commit had succeeded). Checking every typed key up front means a
-        bad config stops a command before it changes anything."""
+        """Reject wrong-typed settings before commit, amend or merge changes
+        anything. Inspection and export do not consume these settings, so
+        opening a repository must not validate them: a typo must not block
+        status, verify or access to the saved files."""
         typed = (
             ("history", "reminder_threshold", cfg.getint, "a whole number"),
             ("merge", "block_unresolved_markers", cfg.getboolean, "true or false"),
@@ -694,11 +711,11 @@ class Repo:
         for section, key, getter, wanted in typed:
             try:
                 getter(section, key, fallback=None)
-            except ValueError:
+            except (ValueError, configparser.Error):
                 raise FirnpackError(
                     f"cannot use {path}: [{section}] {key} = "
-                    f"{cfg.get(section, key)!r} is not {wanted}. Fix that "
-                    f"line, or delete the file to fall back to the defaults."
+                    f"{cfg.get(section, key, raw=True)!r} is not {wanted}. Fix "
+                    f"that line, or delete the file to fall back to the defaults."
                 ) from None
 
     @property
@@ -732,7 +749,7 @@ class Repo:
         )
         db.commit()
         db.close()
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg["user"] = {"name": author or getpass.getuser()}
         cfg["core"] = {"profile": "gzip", "autoname": "true"}
         cfg["merge"] = {"block_unresolved_markers": "true"}
@@ -1123,6 +1140,18 @@ class Repo:
                 merged[path] = (result.encode("utf-8"), None, o[2])
         return merged, conflicts
 
+    def _tree_of(self, layer_id: str) -> dict:
+        """A layer as {path: (bytes|None, target|None, exec_bit)}."""
+        _, manifest, _ = self._read_layer(layer_id)
+        data = self._layer_contents(layer_id, set(manifest))
+        tree = {}
+        for path, v in manifest.items():
+            if v["target"] is not None:
+                tree[path] = (None, v["target"], False)
+            else:
+                tree[path] = (data.get(path, b""), None, v.get("mode") == 0o755)
+        return tree
+
     def merge(self, ref: str, message: str | None = None) -> dict:
         """3-way merge of a branch into the current head (SPEC §10).
 
@@ -1130,6 +1159,7 @@ class Repo:
         theirs). Conflicts -> pending-merge state (merge_theirs), markers
         in the worktree, exit path is resolve-then-commit or --abort.
         """
+        self._validate_config(self._cfg, self.firn / "config")
         wt = self._worktree()
         if wt["merge_theirs"] is not None:
             raise FirnpackError(
@@ -1152,22 +1182,7 @@ class Repo:
             # head to theirs (or advance the pin), then sync the
             # worktree. One transaction, no switch — switch would move
             # the worktree pointer but never touch branches.head.
-            with self._db:
-                if wt["head_kind"] == "branch":
-                    self._db.execute(
-                        "UPDATE branches SET head = ? WHERE name = ?",
-                        (theirs_id, wt["head_branch"]),
-                    )
-                self._db.execute(
-                    "UPDATE worktree SET head_id = ?, head_pin = ?, "
-                    "updated_at = ? WHERE id = 1",
-                    (
-                        theirs_id,
-                        theirs_id if wt["head_kind"] == "pin" else None,
-                        _utcnow(),
-                    ),
-                )
-            self._sync_worktree_to(theirs_id)
+            self._move_head_and_sync(wt, theirs_id, wt["head_kind"])
             return {
                 "status": "fast_forwarded",
                 "head": theirs_id,
@@ -1176,15 +1191,7 @@ class Repo:
 
         # load the three trees
         def tree_of(layer_id):
-            _, manifest, _ = self._read_layer(layer_id)
-            data = self._layer_contents(layer_id, set(manifest))
-            tree = {}
-            for path, v in manifest.items():
-                if v["target"] is not None:
-                    tree[path] = (None, v["target"], False)
-                else:
-                    tree[path] = (data.get(path, b""), None, v.get("mode") == 0o755)
-            return tree
+            return self._tree_of(layer_id)
 
         base_tree = tree_of(base_id)
         ours_tree = tree_of(ours_id)
@@ -1220,12 +1227,20 @@ class Repo:
                 (theirs_id,),
             )
         self._materialize(merged)  # markers included
-        return {
+        result = {
             "status": "conflict",
             "head": ours_id,
             "theirs": theirs_id,
             "conflicts": conflicts,
         }
+        kept_sides = {
+            path: "theirs" if path not in ours_tree else "ours"
+            for path in conflicts
+            if path not in ours_tree or path not in theirs_tree
+        }
+        if kept_sides:
+            result["kept_sides"] = kept_sides
+        return result
 
     def merge_abort(self) -> dict:
         """Abort a pending merge: rescue any drift (SPEC 9.7 — including
@@ -1328,8 +1343,10 @@ class Repo:
         message: str | None = None,
         *,
         allow_markers: bool = False,
+        allow_binary_conflict: bool = False,
         allow_flattened: bool = False,
     ) -> dict:
+        self._validate_config(self._cfg, self.firn / "config")
         wt = self._worktree()
         files, symlinks, ignored, _nested = self._walk()
         entries, stats = self._current_tree(files, symlinks)
@@ -1362,17 +1379,20 @@ class Repo:
         # pending merge). A no-op commit never gets here, so a repository
         # that already holds marker-shaped lines can still say "nothing to
         # pack".
-        marked = self._scan_markers(entries)
-        if marked:
-            block = self._cfg.getboolean(
-                "merge", "block_unresolved_markers", fallback=True
-            )
-            if block and not allow_markers:
-                raise MergeConflict(marked, pending_merge=bool(merge_theirs))
-            print(
-                f"warning: conflict markers remain in: {', '.join(marked)}",
-                file=sys.stderr,
-            )
+        self._check_markers(
+            entries, allow=allow_markers, pending_merge=bool(merge_theirs)
+        )
+        if merge_theirs:
+            undecided = self._unresolved_binary_conflicts(merge_theirs, entries)
+            if undecided:
+                if not allow_binary_conflict:
+                    raise BinaryConflict(undecided)
+                print(
+                    f"warning: keeping our version of undecided binary "
+                    f"conflict(s): {', '.join(undecided)}; their version is "
+                    f"not included in this merge's tree.",
+                    file=sys.stderr,
+                )
 
         # Path-length warnings (§13): warn past 240, refuse past ustar's 255.
         long_paths = [
@@ -1465,11 +1485,12 @@ class Repo:
         self._maybe_remind(result)
         return result
 
-    def amend(self, message: str | None = None) -> dict:
+    def amend(self, message: str | None = None, *, allow_markers: bool = False) -> dict:
         """Replace the head layer: same parent(s) as head, tree = the
         current worktree (SPEC 9.3). The old layer stays on disk
         (write-once); the head moves. Message-only amend when the tree
         is unchanged. Refuses while a merge is pending."""
+        self._validate_config(self._cfg, self.firn / "config")
         wt = self._worktree()
         if wt["merge_theirs"] is not None:
             raise FirnpackError(
@@ -1493,6 +1514,9 @@ class Repo:
             # = new (or old if -m omitted)") — but identical record
             # (same everything) dedups to the same layer: a no-op amend
             return {"status": "nothing_to_amend", "layer_id": wt["head_id"]}
+
+        # amend writes a layer, so it gets the same marker guard as commit
+        self._check_markers(entries, allow=allow_markers, pending_merge=False)
 
         msg = message if message is not None else old_msg
         record = {
@@ -1540,16 +1564,78 @@ class Repo:
             "replaced": wt["head_id"],
         }
 
+    def _move_head_and_sync(self, wt: dict, layer_id: str, kind: str) -> None:
+        """Move the head (branch head or pin), then sync the worktree.
+        DB-first ordering records the target across a crash. A caught
+        write failure attempts to restore the previous head and files;
+        the error reports whether that rollback succeeded or was partial."""
+        old_head = wt["head_id"]
+        with self._db:
+            if kind == "branch":
+                self._db.execute(
+                    "UPDATE branches SET head = ? WHERE name = ?",
+                    (layer_id, wt["head_branch"]),
+                )
+            self._db.execute(
+                "UPDATE worktree SET head_id = ?, head_pin = ?, "
+                "updated_at = ? WHERE id = 1",
+                (layer_id, layer_id if kind == "pin" else None, _utcnow()),
+            )
+        created_paths: set[str] = set()
+        try:
+            self._sync_worktree_to(layer_id, created_paths=created_paths)
+        except BaseException as exc:
+            note = (
+                "The previous head could not be restored; head and files may "
+                "be partly updated. Run 'firnpack status' and 'firnpack verify'."
+            )
+            try:
+                with self._db:
+                    if kind == "branch":
+                        self._db.execute(
+                            "UPDATE branches SET head = ? WHERE name = ?",
+                            (old_head, wt["head_branch"]),
+                        )
+                    self._db.execute(
+                        "UPDATE worktree SET head_id = ?, head_pin = ?, "
+                        "updated_at = ? WHERE id = 1",
+                        (old_head, old_head if kind == "pin" else None, _utcnow()),
+                    )
+            except Exception:
+                pass  # preserve the original failure, not a rollback error
+            else:
+                try:
+                    # The old stat cache cannot name files newly created by
+                    # the failed rewrite. Remove only those actually attempted,
+                    # not untouched target paths that may hold ignored work.
+                    for path in sorted(created_paths):
+                        fp = self.root / path
+                        if fp.is_symlink() or fp.is_file():
+                            fp.unlink()
+                    self._sync_worktree_to(old_head)
+                except Exception:
+                    note = (
+                        "The head was put back, but files may be partly "
+                        "written. Run 'firnpack status' before continuing."
+                    )
+                else:
+                    note = (
+                        "The head was put back and files were restored to "
+                        "the previous head."
+                    )
+            if isinstance(exc, FirnpackError):
+                exc.args = (f"{exc} {note}",)
+            else:
+                print(f"warning: {note}", file=sys.stderr)
+            raise
+
     def restore(self, ref: str, *, to_dir: str | None = None) -> dict:
         """Extract a layer over the worktree (rescue first if drift),
         or to a directory when --to is given (SPEC 9.7)."""
         wt = self._worktree()
         layer_id = self._resolve_id(ref)
         if to_dir is not None:
-            dest = Path(to_dir)
-            dest.mkdir(parents=True, exist_ok=True)
-            self._extract_layer_to(layer_id, dest)
-            return {"status": "exported", "layer_id": layer_id, "to": str(dest)}
+            return self.export(layer_id, to_dir)
         # over the worktree: rescue drift first (SPEC 9.7)
         if wt["merge_theirs"] is not None:
             raise FirnpackError(
@@ -1593,27 +1679,25 @@ class Repo:
                         size,
                     ),
                 )
-        # move head: branch or pin at the target layer, sync worktree
-        with self._db:
-            if wt["head_kind"] == "branch":
-                self._db.execute(
-                    "UPDATE branches SET head = ? WHERE name = ?",
-                    (layer_id, wt["head_branch"]),
+        # Move the head and sync; failed writes attempt rollback. A rescue
+        # already written above remains recoverable even if the sync fails.
+        kind = wt["head_kind"]
+        try:
+            self._move_head_and_sync(wt, layer_id, kind)
+        except BaseException:
+            if rescue_id is not None:
+                print(
+                    f"warning: your uncommitted work was saved as layer "
+                    f"{rescue_id}; retrieve it with: firnpack export "
+                    f"{rescue_id} --to DIR",
+                    file=sys.stderr,
                 )
-            self._db.execute(
-                "UPDATE worktree SET head_id = ?, head_pin = ?, "
-                "updated_at = ? WHERE id = 1",
-                (
-                    layer_id,
-                    layer_id if wt["head_kind"] == "pin" else None,
-                    _utcnow(),
-                ),
-            )
-        self._sync_worktree_to(layer_id)
+            raise
         return {
             "status": "restored",
             "layer_id": layer_id,
             "rescue_layer": rescue_id,
+            "previous_head": wt["head_id"],
         }
 
     def export(self, ref: str, to_dir: str) -> dict:
@@ -2386,39 +2470,87 @@ class Repo:
         return f"pack {n} files ({sign}{_human(abs(delta))})"
 
     def _scan_markers(self, entries) -> list[str]:
-        """Tracked text files holding a line that starts with <<<<<<< or
+        """Tracked text files holding a line that STARTS with <<<<<<< or
         >>>>>>> (SPEC §11). Works on the bytes commit() already read for
-        hashing, so the guard costs no second pass over the disk."""
+        hashing (no second disk pass). A UTF-8 BOM before the first marker
+        is ignored, and only \\n, \\r\\n and \\r end a line: form feeds, NEL
+        and the Unicode line separators inside a line are not line breaks."""
         marked = []
         for path, (_size, data, _target, _exec) in entries.items():
             if data is None or b"\0" in data:
                 continue  # symlink or binary
-            for line in data.decode("utf-8", errors="replace").splitlines():
-                if line.startswith("<<<<<<<") or line.startswith(">>>>>>>"):
-                    marked.append(path)
-                    break
+            if data.startswith(b"\xef\xbb\xbf"):
+                data = data[3:]
+            if _MARKER_LINE.search(data):
+                marked.append(path)
         return sorted(marked)
 
+    def _check_markers(self, entries, *, allow: bool, pending_merge: bool) -> None:
+        """The unresolved-marker guard shared by commit and amend (SPEC §9.2,
+        §11; owner decision 2026-10-22). Refuse, or warn when allowed."""
+        marked = self._scan_markers(entries)
+        if not marked:
+            return
+        block = self._cfg.getboolean("merge", "block_unresolved_markers", fallback=True)
+        if block and not allow:
+            raise MergeConflict(marked, pending_merge=pending_merge)
+        print(
+            f"warning: conflict markers remain in: {', '.join(marked)}",
+            file=sys.stderr,
+        )
+
+    def _unresolved_binary_conflicts(self, merge_theirs: str, entries) -> list[str]:
+        """Paths of a pending merge whose BINARY conflict nobody has decided:
+        both sides changed the file differently, one of them holds a NUL byte
+        (no text merge exists), and the worktree still holds exactly OUR
+        version. Committing would silently drop theirs (owner decision
+        2026-10-23). Detected from the layers, so no extra state is stored."""
+        head = self._worktree()["head_id"]
+        base_id = self._lca(head, merge_theirs)
+        if base_id is None:
+            return []
+        base = self._tree_of(base_id)
+        ours = self._tree_of(head)
+        theirs = self._tree_of(merge_theirs)
+        undecided = []
+        for path in sorted(set(ours) & set(theirs)):
+            o, t, b = ours[path], theirs[path], base.get(path)
+            if o == t or b in (o, t):
+                continue  # not a both-changed-differently conflict
+            if o[1] is not None or t[1] is not None:
+                continue  # symlinks have their own rule
+            if b"\x00" not in o[0] and b"\x00" not in t[0]:
+                continue  # text: markers or a clean merge, handled elsewhere
+            mine = entries.get(path)
+            if mine is not None and mine[1] == o[0]:
+                undecided.append(path)
+        return undecided
+
     def _maybe_remind(self, result: dict) -> None:
-        threshold = self._cfg.getint("history", "reminder_threshold", fallback=50)
-        count = self._db.execute("SELECT COUNT(*) FROM layers").fetchone()[0]
-        row = self._db.execute(
-            "SELECT value FROM config WHERE key = 'reminder_last_count'"
-        ).fetchone()
-        last = int(row[0]) if row else 0
-        if count >= threshold > last:
-            total = self._db.execute("SELECT SUM(size) FROM layers").fetchone()[0]
-            result["history_reminder"] = {
-                "layers": count,
-                "bytes": total,
-                "hint": "firnpack compact can shrink it",
-            }
-            with self._db:
-                self._db.execute(
-                    "INSERT OR REPLACE INTO config (key, value) "
-                    "VALUES ('reminder_last_count', ?)",
-                    (str(count),),
-                )
+        """The history reminder is a courtesy printed after a commit that has
+        ALREADY landed, so it must never turn that success into a failure."""
+        try:
+            threshold = self._cfg.getint("history", "reminder_threshold", fallback=50)
+            count = self._db.execute("SELECT COUNT(*) FROM layers").fetchone()[0]
+            row = self._db.execute(
+                "SELECT value FROM config WHERE key = 'reminder_last_count'"
+            ).fetchone()
+            last = int(row[0]) if row else 0
+            if count >= threshold > last:
+                total = self._db.execute("SELECT SUM(size) FROM layers").fetchone()[0]
+                result["history_reminder"] = {
+                    "layers": count,
+                    "bytes": total,
+                    "hint": "firnpack compact can shrink it",
+                }
+                with self._db:
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO config (key, value) "
+                        "VALUES ('reminder_last_count', ?)",
+                        (str(count),),
+                    )
+        except (sqlite3.Error, ValueError):
+            result.pop("history_reminder", None)
 
     def _sweep_orphans(self) -> None:
         """Remove crash leftovers: stray .tmp files and layer files with no
@@ -2688,7 +2820,9 @@ class Repo:
             self._sync_worktree_to(layer_id)
         return {"ref": ref, "kind": kind, "head": layer_id}
 
-    def _sync_worktree_to(self, layer_id: str) -> None:
+    def _sync_worktree_to(
+        self, layer_id: str, *, created_paths: set[str] | None = None
+    ) -> None:
         """Extract the layer's tree into the worktree and refresh the
         snapshot/stat cache. M1 scope: files+symlinks replaced wholesale.
 
@@ -2711,6 +2845,8 @@ class Repo:
         for path in sorted(manifest):
             v = manifest[path]
             fp = self.root / path
+            if created_paths is not None and not os.path.lexists(fp):
+                created_paths.add(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             if v["target"] is not None:
                 if fp.exists() or fp.is_symlink():
@@ -2889,13 +3025,18 @@ def _cmd_commit(args) -> int:
             args.message,
             allow_markers=args.allow_markers,
             allow_flattened=args.allow_flattened,
+            allow_binary_conflict=args.allow_binary_conflict,
         )
-    except MergeConflict as exc:
+    except (MergeConflict, BinaryConflict) as exc:
         if args.json:
             # SPEC §9.2: the refusal is machine-readable too; the humane
             # sentence still goes to stderr via main()
-            payload = {"status": "blocked_by_markers", "blocked_by_markers": exc.paths}
-            print(json.dumps(payload, indent=2))
+            key = (
+                "blocked_by_binary_conflict"
+                if isinstance(exc, BinaryConflict)
+                else "blocked_by_markers"
+            )
+            print(json.dumps({"status": key, key: exc.paths}, indent=2))
         raise
     finally:
         repo.close()
@@ -2996,7 +3137,12 @@ def _cmd_diff(args) -> int:
 def _cmd_amend(args) -> int:
     repo = Repo.discover()
     try:
-        result = repo.amend(args.message)
+        result = repo.amend(args.message, allow_markers=args.allow_markers)
+    except MergeConflict as exc:
+        if args.json:
+            payload = {"status": "blocked_by_markers", "blocked_by_markers": exc.paths}
+            print(json.dumps(payload, indent=2))
+        raise
     finally:
         repo.close()
     if args.json:
@@ -3025,6 +3171,12 @@ def _cmd_restore(args) -> int:
         return 0
     rescue = result.get("rescue_layer")
     print(f"restored layer {result['layer_id'][:12]} into the worktree")
+    prev = result.get("previous_head")
+    if prev and prev != result["layer_id"]:
+        print(
+            f"the head moved from {prev[:12]} to {result['layer_id'][:12]}; "
+            f"to come back: firnpack restore {prev[:12]}"
+        )
     if rescue:
         print(
             f"your uncommitted work was saved as layer {rescue[:12]} "
@@ -3154,9 +3306,17 @@ def _cmd_merge(args) -> int:
             return 1
         else:
             result = repo.merge(args.ref, args.message)
-    except MergeConflict:
-        # merge() reports conflicts in its result dict, not via the
-        # exception — this except is defensive only
+    except MergeConflict as exc:
+        # A clean three-way result can still contain marker-shaped text.
+        # commit() leaves the merge pending; report the same JSON refusal
+        # as an explicit commit, then let main() print the human sentence.
+        if args.json:
+            print(
+                json.dumps(
+                    {"status": "blocked_by_markers", "blocked_by_markers": exc.paths},
+                    indent=2,
+                )
+            )
         raise
     finally:
         repo.close()
@@ -3195,10 +3355,19 @@ def _cmd_merge(args) -> int:
             file=sys.stderr,
         )
         for path in result["conflicts"]:
-            print(f"  {path}", file=sys.stderr)
+            kept = result.get("kept_sides", {}).get(path)
+            detail = f" (kept modified side: {kept})" if kept else ""
+            print(f"  {path}{detail}", file=sys.stderr)
         print(
-            "fix the marked files (<<<<<<< ... >>>>>>>), then commit. "
-            "Or: firnpack merge --abort",
+            f"source layers: ours {result['head']}, theirs {result['theirs']}. "
+            f"Inspect either with: firnpack export <layer-id> --to DIR",
+            file=sys.stderr,
+        )
+        print(
+            "resolve the listed files, then commit: text conflicts have "
+            "markers (<<<<<<< ... >>>>>>>); binary conflicts keep ours "
+            "(replace the file, or use commit --allow-binary-conflict to "
+            "keep ours on purpose). Or: firnpack merge --abort",
             file=sys.stderr,
         )
         return 1
@@ -3356,6 +3525,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm storing flattened symlinks as files",
     )
+    p_commit.add_argument(
+        "--allow-binary-conflict",
+        action="store_true",
+        help="finish a merge keeping YOUR version of an undecided binary file",
+    )
     p_commit.add_argument("--json", action="store_true")
     p_commit.set_defaults(func=_cmd_commit)
 
@@ -3389,6 +3563,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_amend = sub.add_parser("amend", help="replace the head layer")
     p_amend.add_argument("-m", "--message", default=None)
+    p_amend.add_argument(
+        "--allow-markers",
+        action="store_true",
+        help="amend despite leftover conflict markers",
+    )
     p_amend.add_argument("--json", action="store_true")
     p_amend.set_defaults(func=_cmd_amend)
 
@@ -3468,6 +3647,17 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except BinaryConflict as exc:
+        print(
+            f"firnpack: the merge left a binary file undecided: "
+            f"{', '.join(exc.paths)}. Committing now would silently keep YOUR "
+            f"version and drop theirs. Copy theirs in first (firnpack export "
+            f"<their branch> --to DIR, then copy the file over), or commit "
+            f"anyway on purpose with --allow-binary-conflict, or give up "
+            f"with 'firnpack merge --abort'.",
+            file=sys.stderr,
+        )
+        return 1
     except MergeConflict as exc:
         if exc.pending_merge:
             print(
@@ -3494,7 +3684,12 @@ def main(argv=None) -> int:
         print(f"firnpack: {exc}", file=sys.stderr)
         return 1
     except BrokenPipeError:
-        raise
+        # `firnpack history | head -1`: the reader left, which is not an
+        # error. Point stdout at the null device so the interpreter's
+        # shutdown flush cannot raise again, and leave quietly.
+        with contextlib.suppress(Exception):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except sqlite3.OperationalError as exc:
         text = str(exc)
         if "no such table" in text or "no such column" in text:

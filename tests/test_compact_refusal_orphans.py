@@ -1,8 +1,9 @@
-"""Refused compact must not mutate .firn/layers/ (refusals are atomic).
+"""A compact precondition refusal must not mutate .firn/layers/.
 
-Contract basis: docs/agent-contract.md (refusal = nothing mutated). Red-first:
-`compact --keep 1` without `--yes` exits rc1 but currently unlinks
-unreferenced layers/*.firn and layers/*.firn.tmp. The --dry-run control keeps them.
+Contract basis: docs/agent-contract.md (precondition refusals precede writes).
+Red-first reproduction: before the fix, `compact --keep 1` without `--yes`
+exited 1 but unlinked unreferenced layers/*.firn and layers/*.firn.tmp.
+The --dry-run control kept them.
 """
 
 import importlib.util

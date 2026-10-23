@@ -225,8 +225,8 @@ def test_wrong_typed_config_value_stops_before_anything_is_written(
     """A bad value used to escape as a raw ValueError traceback from
     inside commit(), for `reminder_threshold` AFTER the layer was already
     written (the command said it failed while the commit had succeeded).
-    Now the repository refuses to open: one line naming the key and the
-    way out, exit 1, nothing written."""
+    Now commit refuses before writing: one line naming the key and the
+    way out, exit 1, nothing written. Inspection stays available."""
     cfg = repo_dir / ".firn" / "config"
     lines = cfg.read_text(encoding="utf-8").splitlines()
     for i, line in enumerate(lines):

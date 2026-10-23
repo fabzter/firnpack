@@ -717,7 +717,7 @@ class TestJsonContractShapes:
 
         head = j("history")["commits"][0]["id"]
         out = j("restore", head[:10])
-        assert set(out) == {"status", "layer_id", "rescue_layer"}
+        assert set(out) == {"status", "layer_id", "rescue_layer", "previous_head"}
 
         dest = project.parent / "exp"
         out = j("export", head[:10], "--to", str(dest))
