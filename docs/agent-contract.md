@@ -7,14 +7,16 @@ of them is a versioned contract change, not a refactor.
 
 ## 1. Process contract
 
-- One JSON object on **stdout** with `--json`, nothing else; human notes and
-  warnings go to **stderr**. Never parse stderr.
+- On success, one JSON object on **stdout** with `--json`, nothing else;
+  human notes and warnings go to **stderr**. The documented marker/binary
+  refusals also emit JSON; other failures may leave stdout empty. Never
+  parse stderr as a machine schema.
 - Exit codes: `0` success (including explicit no-op outcomes),
   `1` refused/failed with a humane message, `2` CLI usage error,
-  `3` integrity failure. A refusal (1) means **nothing was mutated** unless
-  the command's contract says otherwise (only `restore` and `merge --abort`
-  may add a rescue layer while refusing to destroy work — and they report
-  it).
+  `3` integrity failure. Exit 1 alone does not guarantee no changes:
+  conflicting or marker-blocked merges leave pending state and merged
+  files; restore/abort may save rescue layers, and I/O failure may leave
+  partial writes. Read the command's contract and recovery message.
 - `firnpack: ` prefixes error text on stderr. Match on exit code first,
   message text second.
 - Discovery: commands operate on the repository containing the working
@@ -24,9 +26,11 @@ of them is a versioned contract change, not a refactor.
 
 ## 2. Read-only set
 
-These never mutate the repository or worktree, in any state:
-`status`, `history`, `diff`, `verify`, `export`, `list-branches`,
-`compact --dry-run`. Agents may run them freely, including in loops.
+These do not change repository history, refs or existing worktree files:
+`status`, `history`, `diff`, `verify` (without `--rebuild-db`),
+`list-branches`, `compact --dry-run`, and `export` / `restore --to` to a
+missing or empty destination. Exports do write that destination; choose
+one outside the worktree to avoid creating new untracked files.
 
 ## 3. Error taxonomy
 
@@ -36,16 +40,23 @@ These never mutate the repository or worktree, in any state:
 | pending-merge guard | 1 | "merge is pending" | resolve markers + `commit`, or `merge --abort` |
 | merge conflict | 1 | JSON `status: "conflict"` with `conflicts: [paths]` | edit markers, then `commit` (records both parents); or `--abort` |
 | unresolved markers | 1 | message "conflict markers (<<<<<<< / >>>>>>>) are still in: …", or `merge conflict — resolve these files first` while a merge is pending; `--json`: `status: "blocked_by_markers"` | remove the markers and commit again; never pass `--allow-markers` on your own |
+| undecided binary conflict | 1 | message "the merge left a binary file undecided: …"; `--json`: `status: "blocked_by_binary_conflict"` | decide with the human: copy their version in, or `merge --abort`; pass `--allow-binary-conflict` only when the human says to keep ours |
 | compact refusal | 1 | message names a branch (merge/delete it, or raise `--keep`), or "still referenced" with no branch (a merge edge: raise `--keep` only; deleting a branch cannot clear it), or the kept-merge second-parent condition | raise `--keep`; delete the named branch only when the message names one; re-plan |
 | permission refusal | 1 | "pass --yes", "--keep must be" | stop; obtain explicit human parameters |
 | integrity failure | 3 | `firnpack: integrity failure:` + problem list | stop writes; run `verify`; follow `storage.md` recovery |
 | usage error | 2 | argparse text | fix the invocation |
 | file system error | 1 | `firnpack: file system error:` + the OS reason and file | stop; free disk space or close whatever holds the file (OneDrive, antivirus); run `verify`; retry |
 | database busy | 1 | `firnpack: the database could not be used` | another command or a sync client has `glacier.db` open; wait and retry; never parallelize |
-| unreadable config | 1 | `firnpack: cannot read …/.firn/config` | fix or delete the named file (defaults apply); do not edit it blindly |
+| invalid config syntax | 1 | `firnpack: cannot read …/.firn/config` | fix or delete the named file (defaults apply); do not edit it blindly |
+| wrong-typed config value | 1 | `firnpack: cannot use …/.firn/config` naming a key | fix that value before `commit`, `amend` or `merge`; inspection, export and `verify` remain usable |
 
-Refusals are **atomic**: the repository and worktree are byte-identical
-after them (rescue-layer additions excepted, and reported).
+Precondition refusals (drift, pending-merge, compact eligibility, typed
+config) occur before command writes. Marker/binary refusals from an
+explicit `commit` or `amend` write no layer. A marker refusal during
+`merge` is different: its files have already been materialized and its
+pending state is durable; resolve and commit, or abort. A failed
+restore/fast-forward attempts rollback and reports its outcome; never
+assume atomicity after an I/O error.
 
 ## 4. Safe behaviors (MUST)
 
@@ -87,7 +98,8 @@ after them (rescue-layer additions excepted, and reported).
 commit    {status: packed|nothing_to_pack, layer_id?, tree_id?, files?,
            size?, message?, maxpath_warning?, history_reminder?}
           refused (exit 1) → {status: blocked_by_markers,
-          blocked_by_markers: [paths]}
+          blocked_by_markers: [paths]} or {status: blocked_by_binary_conflict,
+          blocked_by_binary_conflict: [paths]}
 status    {head: {id, kind, branch?}|null, clean, modified[], added[],
            missing[], ignored_count, ignored[], nested_gitignore,
            merge_pending, flattened_pending}
@@ -96,9 +108,17 @@ history   {commits: [{id, tree_id, parent, second_parent, message, author,
 diff      {entries: [{path, status: added|modified|deleted, binary,
            hunks?|size?}]}
 merge     {status: merged|fast_forwarded|already_up_to_date|conflict, …}
+          conflict may also carry kept_sides: {path: ours|theirs}
+          for delete/modify paths; head/theirs identify the source layers
+          marker-blocked automatic commit (exit 1) →
+          {status: blocked_by_markers, blocked_by_markers: [paths]}
+          (merged files and pending state remain)
           --abort → {status: aborted, head, rescue_layer}
 amend     {status: amended|nothing_to_amend, layer_id, replaced?}
-restore   {status: restored|exported, layer_id, rescue_layer?, to?}
+          refused (exit 1) → {status: blocked_by_markers,
+          blocked_by_markers: [paths]}
+restore   {status: restored|exported, layer_id, rescue_layer?, previous_head?,
+           to?}   (restore moves the head: report previous_head to the human)
 export    {status: exported, layer_id, to}
 verify    {status: ok, layers}            (failures exit 3, no JSON)
           --rebuild-db → {status: rebuilt, layers, main_head,
@@ -124,10 +144,16 @@ parents/second parents; timestamps are UTC ISO-8601 with offset.
 1. `status` → must be clean and `merge_pending: false`, else stop.
 2. `merge BRANCH --json`:
    - `merged` / `fast_forwarded` / `already_up_to_date` → done; report head.
-   - `conflict` → for each path in `conflicts`: read the file, resolve
-     `<<<<<<<`/`=======`/`>>>>>>>` blocks (git-compatible by design), write
-     the resolution, then `commit -m "merge BRANCH"` — the pending state
-     supplies the second parent automatically.
+   - `conflict` → for each path in `conflicts`: read the file. Text files:
+     resolve the `<<<<<<<`/`=======`/`>>>>>>>` blocks (git-compatible by
+     design). **Binary files** (no markers; `merge` keeps OUR version in the
+     worktree): decide with the human, then either copy their version in
+     (`export` their branch head to a scratch directory and copy the file
+     over) or, only if the human wants to keep ours, pass
+     `--allow-binary-conflict`. Then `commit -m "merge BRANCH"` — the pending
+     state supplies the second parent automatically. `commit` refuses
+     (exit 1, `blocked_by_binary_conflict`) while a binary file still holds
+     our version undecided.
    - Giving up: `merge --abort` (rescues partial resolutions; report
      `rescue_layer`).
 3. Never commit conflict markers: `commit` refuses them by default, in or

@@ -2,10 +2,13 @@
 
 > **Status: REVIEW CLOSED 2026-10-18 (owner sign-off) — approved for
 > implementation; v0.14 amendments owner-ratified 2026-10-20.** All §25
-> questions owner-resolved; the Q20
-> flatten-persistence chain was ratified by the owner 2026-10-19. No
-> outstanding items. Companions: `AGENTS.md` (founding context),
-> `research/` (web research backing decisions). v0.1→v0.2: self-review fixes
+> questions owner-resolved; the Q20 flatten-persistence chain was ratified
+> 2026-10-19. Post-release owner amendments: marker-guard scope (2026-10-22;
+> full-tree scope confirmed 2026-10-23), symlink fallback deferred past 1.0
+> (2026-10-22), binary-conflict guard and loud restore head moves
+> (2026-10-23), `compact --keep N` minimum 1 (2026-10-23).
+> Companions: `AGENTS.md` (founding context), `research/` (web research
+> backing decisions). v0.1→v0.2: self-review fixes
 > (dual identity hashes, HEAD-file removal, fast-forward merge, schema
 > alignment). v0.2→v0.3: external review round — de-circularized `layer_id`
 > (hashes a canonical commit record, never the payload containing it), v1.0
@@ -708,7 +711,9 @@ unreachable — allowed by design. Amending a root layer creates a new root, sam
 way. If the worktree tree equals the head layer's tree, amend only rewrites the
 message (still a new layer_id — message is part of identity). **Refuses while a
 merge is pending** (exit 1): amend would re-parent a half-finished merge.
-Resolve/abort the merge first.
+Resolve/abort the merge first. `amend` writes a layer, so it gets the same
+unresolved-marker guard as `commit` (§11) with the same overrides
+(`--allow-markers`, `[merge] block_unresolved_markers = false`).
 
 ### 9.4 branch, branch-from-commit, switch
 
@@ -755,8 +760,16 @@ merge layers show both parents. `--json` mirrors it.
   worktree is the merge resolution state; clobbering it would destroy the user's
   conflict work. `merge --abort` is the intended exit. `--to DIR` and `export`
   remain available (read-only, don't touch the worktree).
-- `export <id> --to DIR` — extract into a fresh directory; never destructive;
-  the recommended exploration path for agents.
+  **Decided 2026-10-23 (owner): the head move is kept and is never silent.**
+  The result and the CLI report the previous head (`previous_head` in JSON;
+  "the head moved from X to Y; to come back: firnpack restore X").
+  Implementation: a failed worktree rewrite attempts to put the previous
+  head and its files back; the error reports whether that rollback worked
+  or files may be partly written. A rescue layer already saved is named on
+  stderr even when the restore fails.
+- `export <id> --to DIR` and `restore <ref> --to DIR` require a missing or
+  empty destination directory; neither overwrites existing files. Export
+  is the recommended exploration path for agents.
 
 ### 9.8 verify
 
@@ -781,6 +794,8 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
 - `--keep N` — **required, no default, and no config default exists or
   may be added**: an agent must state N explicitly every time; nothing
   lets compaction fire unprompted (owner rule: never without permission).
+  **Owner-resolved 2026-10-23:** N must be at least 1; zero and negative
+  values are refused in every mode, not interpreted as "squash everything".
   Keep the newest N layers of the current head's **first-parent chain**;
   everything below the cut is squashed into one new **foundation layer**
   (tree = tree at the cut; message records the squashed id range, layer
@@ -927,13 +942,14 @@ cases; the algorithm is the boring, correct one:
   them natively.
 - delete/modify: modified content kept; reported as a conflict (the report names
   the kept side). Rationale: non-destructive default for a non-developer (Q7).
-- Binary conflicts: reported with both `tree-side` hashes; resolution workflow is
-  `export`/`restore --to` + copy (per-path restore is v2, Q8).
+- Binary conflicts: the report identifies both source layers (`head` and
+  `theirs` in JSON; layer-id hashes, not separate per-file hashes).
+  Resolution is `export`/`restore --to` + copy (per-path restore is v2, Q8).
 - A conflicted merge never writes a layer, but it *does* write state: the
   pending-merge (`merge_theirs`) is durable in the DB, surfaced in `status`
   (human: *"merge in progress — resolve markers, then commit"*; JSON:
-  `"merge_pending": true, "merge_theirs": "<id>"`). An agent checking `status`
-  can never mistake a mid-merge worktree for ordinary drift.
+  `"merge_pending": true`; `merge_theirs` itself stays in the DB). An agent
+  checking `status` can never mistake a mid-merge worktree for ordinary drift.
 - **Unresolved-marker guard at commit — owner decision 2026-10-18**:
   completing a pending merge with leftover `<<<<<<<`/`>>>>>>>` markers
   **blocks** by default (exit 1; report lists files; JSON:
@@ -945,10 +961,30 @@ cases; the algorithm is the boring, correct one:
   `>>>>>>>` only; `=======` alone is excluded (markdown/RST false
   positives).
   > **Decided 2026-10-22 (owner)**: the guard covers **every commit that
-  > would write a layer**, not only the one completing a pending merge. A
-  > commit that would write nothing still says "nothing to pack". On refusal
-  > `--json` prints `{"status": "blocked_by_markers", "blocked_by_markers":
-  > [paths]}` on stdout (sorted) and the humane sentence goes to stderr.
+  > would write a layer**, not only the one completing a pending merge.
+
+  Implementation details: a no-op still says "nothing to pack"; refusals
+  under `--json` print `{"status": "blocked_by_markers",
+  "blocked_by_markers": [paths]}` on stdout (paths sorted), with the human
+  sentence on stderr. This also covers `amend` and the automatic commit
+  inside a clean three-way `merge`; a blocked merge remains pending.
+  **Owner-resolved 2026-10-23:** keep the whole-tree scan, including
+  unchanged marker-shaped text. A prior `--allow-markers` is not remembered;
+  later layer-writing commits and amends require the override again.
+- **Undecided binary conflict at commit — owner decision 2026-10-23**: when
+  both branches changed a binary file (a NUL byte, so no text merge exists)
+  the merge keeps OUR version in the worktree and leaves the merge pending.
+  Completing the merge while the file still equals our version would drop
+  theirs silently, so `commit` **refuses** (exit 1; stderr names the files and
+  the ways out; JSON `{"status": "blocked_by_binary_conflict",
+  "blocked_by_binary_conflict": [paths]}`, sorted). The user decides by
+  putting any other content in the file (for example copying theirs in via
+  `export`), by passing `commit --allow-binary-conflict` to keep ours on
+  purpose (with a stderr warning naming the kept paths), or by
+  `merge --abort`. Only files both sides still have are
+  covered; text conflicts keep the marker guard, and delete/modify keeps the
+  modified side as before (Q7). The state is derived from the layers, so
+  nothing new is stored.
 
 ## 12. Status & change detection
 

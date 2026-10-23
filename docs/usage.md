@@ -15,10 +15,14 @@ operators), [`storage.md`](storage.md) (on-disk format and recovery),
 | 3 | integrity failure (`verify`, or any command that hits a corrupt glacier) |
 
 **JSON mode**: every command except `init`, `rename-branch` and `delete-branch`
-accepts `--json` and prints exactly one JSON object on stdout (human notes,
-when any, go to stderr). Shapes below are the `--json` payloads; optional
-keys carry a `// [optional]` comment.
+accepts `--json` and, on success, prints exactly one JSON object on stdout
+(human notes go to stderr). The documented marker/binary refusals also
+emit JSON; other failures may leave stdout empty. Shapes below are the
+`--json` payloads; optional keys carry a `// [optional]` comment.
 
+**One command at a time per repository.** Writes and their orphan sweep
+assume a single writer; do not run commands against the same `.firn/`
+concurrently.
 ---
 
 ## init
@@ -44,7 +48,8 @@ tracked file.
 ## commit
 
 ```
-firnpack commit [-m MSG] [--allow-markers] [--allow-flattened] [--json]
+firnpack commit [-m MSG] [--allow-markers] [--allow-binary-conflict]
+                [--allow-flattened] [--json]
 ```
 
 Packs the tracked working tree into a new layer on the current head (branch
@@ -53,9 +58,18 @@ set. Refuses (exit 1, nothing written) when any tracked text file still has
 a line starting `<<<<<<<` or `>>>>>>>` — in or out of a merge — unless
 `--allow-markers` (one commit) or `[merge] block_unresolved_markers = false`
 (warn and commit). `=======` alone, indented or mid-line markers, binary
-files and symlinks are not flagged, and a commit that would write nothing
-still reports "nothing to pack". Consumes a pending merge by recording
-`merge_theirs` as the new layer's second parent.
+files and symlinks are not flagged (a marker only counts at the start of a
+line; a UTF-8 byte-order mark in front of it is ignored), and a commit that
+would write nothing still reports "nothing to pack". Consumes a pending
+merge by recording `merge_theirs` as the new layer's second parent.
+
+While a merge is pending, `commit` also refuses (exit 1, nothing written)
+when a **binary** file that both branches changed still holds exactly your
+version: finishing the merge would silently drop theirs. Put other content
+in the file (for example copy theirs in after `firnpack export`), pass
+`--allow-binary-conflict` to keep yours on purpose, or `merge --abort`.
+The override warns on stderr naming the paths kept as yours. Theirs
+remains in its original layer, but is not included in the merge's tree.
 
 ```
 $ firnpack commit -m "chapters 1-3 draft"
@@ -84,8 +98,14 @@ identical to the head. The `history_reminder` object appears once per
 crossing of the configured threshold (default 50 layers).
 
 A refused commit (exit 1) prints, with `--json`, exactly one object on
-stdout — `{"status": "blocked_by_markers", "blocked_by_markers":
-["notes.txt"]}` (paths sorted) — and the human sentence on stderr.
+stdout and the human sentence on stderr: `{"status": "blocked_by_markers",
+"blocked_by_markers": ["notes.txt"]}` for leftover markers, or
+`{"status": "blocked_by_binary_conflict", "blocked_by_binary_conflict":
+["img.bin"]}` for an undecided binary conflict (paths sorted).
+The marker scan checks **all tracked text files**, including unchanged
+examples already committed with `--allow-markers` (owner-confirmed
+2026-10-23). That flag is per invocation, so another layer-writing commit
+or amend needs it again while those examples remain.
 
 > **For agents**: a clean `status` is the precondition for `merge` and
 > `switch`; `commit` is the only command that consumes a pending merge.
@@ -205,7 +225,7 @@ JSON — `branch`: `{"name": …, "head": "<40 hex>", "created": true}`.
 
 ```
 firnpack merge BRANCH [-m MSG] [--json]
-firnpack merge --abort
+firnpack merge --abort [--json]
 ```
 
 3-way merge of BRANCH into the current head. Refuses (exit 1, nothing
@@ -229,19 +249,39 @@ JSON — outcomes:
 the repository). `--abort`: `{"status": "aborted", "head": "<40 hex>",
 "rescue_layer": "<id>|null"}`.
 
+Delete/modify conflicts keep the modified file and identify that side.
+Their JSON conflict object also carries `kept_sides` (optional), for
+example `{"img.bin": "theirs"}`; ordinary text/binary conflicts omit it.
+`head` and `theirs` identify the source layers; human output prints both
+IDs so either version can be inspected with `export`. Binary conflicts
+keep your bytes without markers; choose content before committing, or
+explicitly keep yours with `commit --allow-binary-conflict`.
+
+A clean three-way result can still contain marker-shaped text. If the
+automatic commit is blocked, `merge --json` exits 1 with
+`{"status": "blocked_by_markers", "blocked_by_markers": [paths]}`.
+The merged files and pending state remain: resolve the markers and
+`commit`, explicitly keep examples with `commit --allow-markers`, or
+`merge --abort`.
+
 ## amend
 
 ```
-firnpack amend [-m MSG] [--json]
+firnpack amend [-m MSG] [--allow-markers] [--json]
 ```
 
 Replaces the head layer with the same parent(s): new tree from the worktree,
 message = `-m` or the old message. The replaced layer stays on disk
 (write-once) until a `compact` collects it. Refuses mid-merge and on an
 empty repository; identical tree + no `-m` reports `nothing_to_amend`.
+`--allow-markers` (or `[merge] block_unresolved_markers = false`) overrides
+the leftover-marker guard for this amend, as for `commit`.
 
 JSON: `{"status": "amended", "layer_id": "<40 hex>", "replaced": "<40 hex>"}`
-or `{"status": "nothing_to_amend", "layer_id": "<40 hex>"}`.
+or `{"status": "nothing_to_amend", "layer_id": "<40 hex>"}`. With leftover
+conflict markers, `amend` refuses exactly like `commit` (exit 1, nothing
+written; `--json` prints `{"status": "blocked_by_markers",
+"blocked_by_markers": [paths]}`).
 
 ## restore
 
@@ -255,18 +295,27 @@ rescue layer before anything is overwritten, and the output names it.
 `--to DIR` extracts without touching the worktree or the head (same
 semantics as `export`). Refuses mid-merge.
 
+**The head moves, and the output says so.** `restore` leaves the branch (or
+pin) pointing at REF, so a later `commit` builds on that older layer. The
+human output prints "the head moved from X to Y; to come back: firnpack
+restore X", and JSON carries `previous_head`. If writing the files fails,
+firnpack attempts to put the previous head and files back; the error says
+whether rollback succeeded or files may be partly written. An already-saved
+rescue layer is named on stderr with its export command even on failure.
+
 **Symbolic links (known limitation, deferred past 1.0)**: if the layer holds
 symlinks and this account cannot create them (Windows without Developer Mode
 or administrator rights), `restore`, `export` and `merge` stop at the first
-link with a plain message and exit 1; history is not changed, files written
-before that point stay on disk, and for `restore` any uncommitted work was
-already packed as a rescue layer. Enable Developer Mode or use a machine that
-allows symlinks. A probe-first refusal and a `--flatten-symlinks` opt-in are
+link with a plain message and exit 1. `restore` and a fast-forward `merge`
+attempt rollback as described above. A failed `export` or `restore --to`
+can leave a partially extracted destination. `merge --abort` hits the same
+limit when the head layer holds a link it cannot create: enable Developer
+Mode first. A probe-first refusal and a `--flatten-symlinks` opt-in are
 designed (SPEC §5) but not implemented.
 
 JSON: `{"status": "restored", "layer_id": "<40 hex>",
-"rescue_layer": "<40 hex>|null"}` or, with `--to`,
-`{"status": "exported", "layer_id": "<40 hex>", "to": "<dir>"}`.
+"rescue_layer": "<40 hex>|null", "previous_head": "<40 hex>"}` or, with
+`--to`, `{"status": "exported", "layer_id": "<40 hex>", "to": "<dir>"}`.
 
 ## export
 
@@ -274,8 +323,9 @@ JSON: `{"status": "restored", "layer_id": "<40 hex>",
 firnpack export REF --to DIR [--json]
 ```
 
-Extracts REF into DIR, which must not exist (fresh-directory-only: the
-zero-risk exploration path). Exec bits are restored on POSIX.
+Extracts REF into DIR, which must be absent or empty (fresh-directory-only:
+existing files are never overwritten). `restore --to` uses the same rule.
+Exec bits are restored on POSIX.
 
 JSON: `{"status": "exported", "layer_id": "<40 hex>", "to": "<dir>"}`.
 
@@ -297,9 +347,11 @@ newest tip layer (one no other layer descends from; newest `created_at`,
 ties broken by id) and prints exactly which
 branch names were lost. It refuses (exit 3) when a layer file fails its
 self-hash or a referenced parent layer file is missing: restore those
-files first. An empty or table-less database file is re-schematized in
-place; if the file is missing entirely or unopenable, replace it with an
-empty file first (`storage.md` §6).
+files first. Missing database files are created automatically; an empty or
+table-less database is re-schematized in place. A file that is not readable
+as SQLite must be backed up and replaced with an empty file before retrying
+(`storage.md` §6). A wrong-typed config value does not block verification;
+invalid INI syntax must still be fixed or the config removed first.
 
 JSON (verify alone, success only): `{"status": "ok", "layers": 12}`.
 JSON (`--rebuild-db`): `{"status": "rebuilt", "layers": N,
@@ -316,12 +368,11 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes] [--json]
 
 Squashes everything below the newest N layers of the current head's
 first-parent chain into one foundation layer and reclaims disk. `--keep` is
-required (no default exists or may be added). Today `0` or a negative number
-is refused (exit 1, nothing touched), in every mode; a non-number is a usage
-error (exit 2). That refusal is the current behavior, not a ratified rule —
-whether `--keep 0` should ever mean something (for example "squash
-everything") is an open owner decision. `--yes` is required for real
-runs; `--dry-run` plans without mutating.
+required (no default exists or may be added), and N must be **at least 1**
+(owner-confirmed 2026-10-23). Zero and negative numbers are refused
+(exit 1, nothing touched) in every mode; a non-number is a usage error
+(exit 2). `--yes` is required for real runs; `--dry-run` plans without
+mutating.
 
 Rewrites, reports and guards (all visible, never silent):
 

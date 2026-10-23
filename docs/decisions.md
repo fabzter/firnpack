@@ -37,9 +37,11 @@ fashion. Pointer: SPEC §5, §14.
 
 ## D-06 — Keep-modified conflicts (2026-10-18, ratified)
 
-delete/modify conflicts keep the modified content and report; binary
-conflicts report both tree-side hashes. Rationale: non-destructive default
-for a non-developer. Pointer: SPEC §11, Q7.
+delete/modify conflicts keep the modified content and report the kept
+side; binary conflicts identify both source layers. Implementation
+clarification (2026-10-23): JSON `head` and `theirs` are layer-id hashes,
+not per-file hashes; optional `kept_sides` labels delete/modify survivors.
+Rationale: non-destructive default for a non-developer. Pointer: SPEC §11, Q7.
 
 ## D-07 — Unresolved conflict markers block commits by default (2026-10-18, ratified)
 
@@ -47,9 +49,12 @@ for a non-developer. Pointer: SPEC §11, Q7.
 `[merge] block_unresolved_markers`, per-commit `--allow-markers`.
 Rationale: a half-resolved merge must never silently become a layer.
 Scope, decided 2026-10-22 (owner): every commit that would write a layer,
-not only the one completing a pending merge; a commit that writes nothing
-still says "nothing to pack". Refusal under `--json` carries
-`blocked_by_markers`. Pointer: SPEC §9.2, §11, v0.7→v0.8.
+not only the one completing a pending merge.
+Full-tree scope, owner-resolved 2026-10-23: retain checks of unchanged
+tracked files too. `--allow-markers` is not remembered across invocations.
+Implementation details: no-ops still say "nothing to pack"; the JSON
+refusal is `{status: "blocked_by_markers", blocked_by_markers: [paths]}`
+with sorted paths. `amend` uses the same guard. Pointer: SPEC §9.2, §11.
 
 ## D-08 — `compact` with a strict permission model (2026-10-18, ratified)
 
@@ -58,6 +63,8 @@ never automatic: `--keep N` required with no default, `--yes` required,
 `--dry-run` plans, `--archive` exports the content-loss set first, reminder
 at 50 layers. Rationale: owner rule — "not without the user or agent
 permission, but readily available". Pointer: SPEC §9.9, Q18.
+Minimum, owner-resolved 2026-10-23: keep refusing zero and negative N;
+`--keep N` must be at least 1, in dry-run and executed modes alike.
 
 ## D-09 — Patch-level posture: warn (2026-10-18, ratified)
 
@@ -162,6 +169,34 @@ newest `created_at`, ties by id — tip-preference refines the Q9
 tie-break so a same-second tie cannot orphan the true head), resets
 the worktree row, names every lost branch, and refuses on corrupt or
 parent-missing layers. Pointer: SPEC §9.8/§13, Q9; docs/storage.md §6 (step 4).
+
+## D-21 — Undecided binary conflicts block the merge commit (2026-10-23, owner)
+
+When both branches changed a binary file, the merge keeps our version and
+stays pending; `commit` used to finish it silently, losing theirs. It now
+refuses until the file holds other content, or `--allow-binary-conflict`
+keeps ours on purpose, or the merge is aborted. Rationale: the same
+"never silent" rule as the marker guard (D-07).
+Implementation details: exit 1, JSON `blocked_by_binary_conflict`; the
+override warns on stderr naming the paths it keeps. Pointer: SPEC §11.
+
+## D-22 — `restore` keeps moving the head, loudly (2026-10-23, owner)
+
+`restore REF` extracts the layer over the worktree and moves the current
+branch head (or pin) to it; the alternative of leaving the head alone and
+treating the files as drift was considered and declined. The move is
+reported. Implementation details: JSON `previous_head`, a "to come back"
+line, and rollback after a failed file rewrite. The error reports whether
+the previous head and files were restored or rollback was incomplete.
+An already-saved rescue layer is reported even on failure.
+Pointer: SPEC §9.7.
+
+## D-23 — Keep the named publishing environment (2026-10-23, owner-resolved)
+
+Keep `environment: pypi` in the release workflow alongside its test,
+tag/version and artifact gates. This retains the local workflow change;
+it does not authorize a push, version bump, tag or publish. Live
+environment protection rules have not been verified.
 
 ## Open (not settled)
 

@@ -26,6 +26,12 @@ store, no reflog, no packed refs.
 `config` keys (all optional with defaults): `user.name` (author string;
 defaults to the OS user), `core.profile` (`gzip`), `core.autoname`,
 `history.reminder_threshold` (50), `merge.block_unresolved_markers` (true).
+Values are literal (no `%` interpolation). `commit`, `amend` and `merge`
+validate integer/boolean settings before changing anything; inspection and
+export do not depend on those types, so a typo does not block `status` or
+`verify`. Invalid INI syntax or invalid UTF-8 still prevents loading the
+config: fix the file, or remove it to use defaults. An existing config
+that cannot be opened produces a warning and defaults are used.
 
 ## 2. Database schema
 
@@ -84,6 +90,9 @@ Write path: `layers/<id>.firn.tmp` → fsync → atomic `os.replace`. A crash
 leaves an orphan `.tmp`/`.firn`, which the next `commit`, `amend` or
 `compact` sweeps (any `*.tmp` in `layers/`, and any `.firn` with no database
 row); orphans are ignorable garbage by construction.
+This protocol assumes **one writer per repository**. In particular, the
+sweep cannot distinguish another process's in-progress layer from an
+orphan: never run concurrent commands against the same `.firn/`.
 
 ## 4. The two hashes
 
@@ -136,10 +145,12 @@ mode is cached so `chmod ±x` shows as drift without a re-hash.
    layers** — they exist only in the database; re-create them by hand.
    The rebuild refuses (exit 3) when a layer file fails its self-hash
    or a referenced parent file is missing: restore those files from an
-   archive or backup first. An empty or table-less database file is
-   re-schematized in place; a missing or unopenable file must be
-   replaced with an empty file (`touch .firn/glacier.db`) before
-   rebuilding. `config` and the reserved `refs` table survive a
-   rebuild untouched.
+   archive or backup first. A missing database file is created
+   automatically; an empty or table-less database is re-schematized in
+   place. If the file cannot be read as SQLite, back it up and replace it
+   with an empty file before rebuilding. If access is denied or it is
+   locked, resolve that access problem first. The SQLite `config` and
+   reserved `refs` tables survive a readable database's rebuild untouched;
+   they cannot be recovered from layers if the old database was lost.
 5. **Moving machines**: copy the project folder including `.firn/` — the
    repository is fully self-contained. `verify` on arrival.

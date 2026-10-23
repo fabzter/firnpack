@@ -18,6 +18,10 @@ holds 102 files. That's the whole design.
 
 ## Install
 
+These docs track the repository source, including fixes planned for 1.0.1
+in [Unreleased](CHANGELOG.md#unreleased). The published 1.0.0 package does
+not include those fixes yet.
+
 Requires Python 3.13.16 or newer.
 
 ```
@@ -111,7 +115,7 @@ the disk.
 
 It is **never automatic and never silent**:
 
-- `--keep N` is required every time — there is no default to trip over;
+- `--keep N` is required every time, with N at least 1 — no default;
 - `--dry-run` prints the full plan (what drops, what rewrites, what gets
   collected, peak disk needed) and changes nothing;
 - real runs require `--yes`;
@@ -141,8 +145,10 @@ Excluded files are never silently hidden: `status` counts them, and
   (`firnpack verify` confirms your history is intact), never a wall of
   technical text.
 - A half-resolved merge can't slip into your history by accident: `commit`
-  refuses files that still contain conflict markers (`<<<<<<<`), merge or no
-  merge, and tells you the one flag that overrides it.
+  and `amend` refuse files that still contain conflict markers (`<<<<<<<`),
+  merge or no merge, and a merge that left a binary file undecided won't
+  finish until you choose a version. Each refusal names the one flag that
+  overrides it.
 - Every layer carries its own checksum, and the layer's *name* is that
   checksum — tampering or disk rot is detectable by re-reading.
 - Extraction of a layer is guarded: a corrupt or hostile archive can never
