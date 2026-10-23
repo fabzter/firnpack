@@ -4,6 +4,7 @@ fixed, its test lives here or already existed; nothing that broke once
 ships untested.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from firnpack import FirnpackError, IntegrityError, Repo  # noqa: E402
+
+MODULE = Path(__file__).resolve().parents[1] / "firnpack.py"
 
 
 def write(root: Path, rel: str, data, mode=None):
@@ -63,17 +66,38 @@ class TestUtf8Output:
     """A commit message with non-cp1252 characters crashed the CLI
     AFTER a successful pack (print with the platform codec). main()
     reconfigures streams to UTF-8; e2e already exercises it via
-    'añadido ✓'. Unit-level: the reconfigure helper never raises."""
+    'añadido ✓'. This drives the real codec path end to end."""
 
-    def test_reconfigure_is_safe(self):
-        # main() runs this on every invocation; it must not raise on
-        # any stream type (pipe, tty, or capture)
-        import contextlib
+    def test_commit_under_cp1252_stdio_succeeds(self, project):
+        """Run the CLI with PYTHONIOENCODING=cp1252 (what a Windows pipe
+        gives Python when PYTHONUTF8 is off) and a commit message
+        cp1252 cannot encode. Without main()'s UTF-8 stream reconfigure
+        the pack would succeed and the summary print would die with
+        UnicodeEncodeError — rc 0 and the layer must both hold."""
+        import os
 
-        for stream in (sys.stdout, sys.stderr):
-            with contextlib.suppress(Exception):
-                stream.reconfigure(encoding="utf-8", errors="replace")
-        # reaching here is the assertion
+        project.mkdir(exist_ok=True)
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env["PYTHONUTF8"] = "0"
+        env.pop("PYTHONLEGACYWINDOWSSTDIO", None)
+
+        def run(*args):
+            return subprocess.run(
+                [sys.executable, str(MODULE), *args],
+                cwd=project,
+                env=env,
+                capture_output=True,
+            )
+
+        assert run("init").returncode == 0
+        write(project, "a.txt", "x\n")
+        p = run("commit", "-m", "añadido ✓")
+        assert p.returncode == 0, p.stderr.decode("utf-8", "replace")
+        # the pack went through AND the summary printed under cp1252
+        assert p.stdout.strip() != b""
+        assert "añadido".encode() in p.stdout  # '✓' -> '?'
+        assert list((project / ".firn" / "layers").glob("*.firn"))
 
 
 class TestMergeDbFirstOrdering:

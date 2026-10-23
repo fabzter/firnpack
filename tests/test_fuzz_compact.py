@@ -110,14 +110,42 @@ def test_compact_fuzz_oracle(seed, project):
     manifests_before = _manifests(repo, heads_before)
     count_before = _count(repo)
     keep = rng.randint(1, max(1, count_before))
+
+    # what compact would do: the plan, plus the cut layer's content
+    # captured BEFORE anything mutates — the foundation must inherit it
+    # byte-for-byte (it is NOT the worktree tree)
     try:
-        repo.compact(keep, yes=True)
+        plan = repo.compact(keep, dry_run=True)
+    except FirnpackError:
+        plan = "refused"
+    cut_manifest = cut_contents = None
+    if isinstance(plan, dict) and plan["status"] == "plan":
+        chain, cursor = [], repo._worktree()["head_id"]
+        seen = set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            chain.append(cursor)
+            row = repo._db.execute(
+                "SELECT parent FROM layers WHERE id = ?", (cursor,)
+            ).fetchone()
+            cursor = row[0] if row else None
+        cut_id = chain[keep]
+        _, cut_manifest, _ = repo._read_layer(cut_id)
+        cut_contents = repo._layer_contents(
+            cut_id, {p for p, v in cut_manifest.items() if v["target"] is None}
+        )
+
+    try:
+        result = repo.compact(keep, yes=True)
     except FirnpackError:
         # oracle 1: the refusal is atomic
         assert _heads(repo) == heads_before
         assert _count(repo) == count_before
         assert repo.verify()["status"] == "ok"
     else:
+        if result["status"] == "nothing_to_compact":
+            repo.close()
+            return
         # oracle 2: the rewrite is sound and content-preserving
         assert repo.verify()["status"] == "ok"
         assert repo._db.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -127,4 +155,30 @@ def test_compact_fuzz_oracle(seed, project):
             assert manifests_after[name] == manifests_before[name], (
                 f"seed {seed}: branch {name!r} lost tree content in the rewrite"
             )
+        # oracle 3 (per seed that executed): the foundation inherits the
+        # cut layer's bytes verbatim — manifest AND file contents
+        assert isinstance(plan, dict) and plan["status"] == "plan", (
+            f"seed {seed}: executed but the dry-run refused first "
+            f"(plan={plan!r}) — refusal must be consistent"
+        )
+        foundation = repo._db.execute(
+            "SELECT id FROM layers WHERE message LIKE 'compact:%'"
+        ).fetchall()
+        assert len(foundation) == 1, f"seed {seed}: {foundation}"
+        _, f_manifest, _ = repo._read_layer(foundation[0][0])
+        assert f_manifest == cut_manifest, (
+            f"seed {seed}: foundation manifest drifted from the cut layer"
+        )
+        f_contents = repo._layer_contents(
+            foundation[0][0],
+            {p for p in f_manifest if f_manifest[p]["target"] is None},
+        )
+        assert f_contents == cut_contents, (
+            f"seed {seed}: foundation file bytes differ from the cut layer"
+        )
+        # oracle 4: the executed result reports exactly what the plan
+        # promised — no silent drift between preview and rewrite
+        assert result["off_chain_rewritten"] == plan["off_chain_rewritten"]
+        assert result["garbage_collected"] == plan["layers_garbage_collected"]
+        assert len(result["branches_remapped"]) == len(plan["branches_remapped"])
     repo.close()
