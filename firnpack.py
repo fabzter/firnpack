@@ -674,7 +674,32 @@ class Repo:
                 f"cannot read {path}: {exc}. Fix the file, or delete it to "
                 f"fall back to the defaults."
             ) from None
+        self._validate_config(cfg, path)
         return cfg
+
+    @staticmethod
+    def _validate_config(cfg: configparser.ConfigParser, path: Path) -> None:
+        """Reject a wrong-typed value when the repository is OPENED.
+
+        A bad `reminder_threshold` used to blow up inside commit() after the
+        layer was already written (the command reported failure while the
+        commit had succeeded). Checking every typed key up front means a
+        bad config stops a command before it changes anything."""
+        typed = (
+            ("history", "reminder_threshold", cfg.getint, "a whole number"),
+            ("merge", "block_unresolved_markers", cfg.getboolean, "true or false"),
+            ("core", "autoname", cfg.getboolean, "true or false"),
+            ("core", "allow_flattened", cfg.getboolean, "true or false"),
+        )
+        for section, key, getter, wanted in typed:
+            try:
+                getter(section, key, fallback=None)
+            except ValueError:
+                raise FirnpackError(
+                    f"cannot use {path}: [{section}] {key} = "
+                    f"{cfg.get(section, key)!r} is not {wanted}. Fix that "
+                    f"line, or delete the file to fall back to the defaults."
+                ) from None
 
     @property
     def author(self) -> str:
@@ -2945,6 +2970,7 @@ def _cmd_history(args) -> int:
             f"{' ' + tips if tips else ''}{merge}"
         )
         print(f"    {c['message']}")
+    return 0
 
 
 def _cmd_diff(args) -> int:

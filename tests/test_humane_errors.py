@@ -208,3 +208,43 @@ def test_symlink_privilege_failure_is_named_honestly(
     assert "file system error" not in err  # not a disk problem
     assert "OneDrive" not in err
     assert sorted(p.name for p in (repo_dir / ".firn" / "layers").iterdir()) == layers
+
+
+@pytest.mark.parametrize(
+    "section,key,bad",
+    [
+        ("history", "reminder_threshold", "abc"),
+        ("merge", "block_unresolved_markers", "maybe"),
+        ("core", "autoname", "perhaps"),
+        ("core", "allow_flattened", "2"),
+    ],
+)
+def test_wrong_typed_config_value_stops_before_anything_is_written(
+    repo_dir, capsys, section, key, bad
+):
+    """A bad value used to escape as a raw ValueError traceback from
+    inside commit(), for `reminder_threshold` AFTER the layer was already
+    written (the command said it failed while the commit had succeeded).
+    Now the repository refuses to open: one line naming the key and the
+    way out, exit 1, nothing written."""
+    cfg = repo_dir / ".firn" / "config"
+    lines = cfg.read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        if line.split("=")[0].strip() == key:
+            lines[i] = f"{key} = {bad}"  # replace the value init wrote
+            break
+    else:  # key not written by init: add it under its section
+        if f"[{section}]" in lines:
+            lines.insert(lines.index(f"[{section}]") + 1, f"{key} = {bad}")
+        else:
+            lines += [f"[{section}]", f"{key} = {bad}"]
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (repo_dir / "a.txt").write_text("two\n", encoding="utf-8")
+    layers = sorted(p.name for p in (repo_dir / ".firn" / "layers").iterdir())
+    rc, err = _run(capsys, "commit", "-m", "second")
+    assert rc == 1, err
+    _assert_one_humane_line(err)
+    assert key in err
+    assert repr(bad) in err
+    assert "delete the file" in err
+    assert sorted(p.name for p in (repo_dir / ".firn" / "layers").iterdir()) == layers
