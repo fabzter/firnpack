@@ -86,9 +86,15 @@ def _load_firnpack():
     return mod
 
 
-def _crash_compact_at_swap(tmp_path, monkeypatch):
+def _crash_compact_at_swap(tmp_path, monkeypatch, capsys):
     """Run `compact --keep 1 --yes` in-process, crashing at the layer swap
-    (<id>.firn.tmp -> <id>.firn), the window docs/storage.md section 3 covers."""
+    (<id>.firn.tmp -> <id>.firn), the window docs/storage.md section 3 covers.
+
+    The crash is asserted HERE, outside any xfail: if the injected failure
+    does not fire, the command succeeds (rc 0) and every caller fails loudly
+    instead of passing vacuously. The user-facing contract is a one-line
+    `firnpack:` message and exit 1, never a traceback (README: errors are
+    plain words)."""
     real_replace = os.replace
 
     def crash_at_swap(src, dst, *args, **kwargs):
@@ -99,15 +105,21 @@ def _crash_compact_at_swap(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "replace", crash_at_swap)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["firnpack", "compact", "--keep", "1", "--yes"])
-    with pytest.raises(OSError, match="injected crash"):
-        _load_firnpack().main()
+    rc = _load_firnpack().main()
+    err = capsys.readouterr().err
+    assert rc == 1, f"injected crash did not surface as exit 1 (rc={rc}): {err}"
+    assert "injected crash at layer swap" in err
+    assert "Traceback" not in err
+    assert err.count("firnpack: file system error") == 1
+    assert "firnpack verify" in err  # tells the user how to confirm history
+    return err
 
 
-def test_crash_at_swap_sweeps_matched_orphans(tmp_path, monkeypatch):
+def test_crash_at_swap_sweeps_matched_orphans(tmp_path, monkeypatch, capsys):
     _build_chain(tmp_path, 3)
     _plant_orphans(tmp_path)
     before = _layers_listing(tmp_path)
-    _crash_compact_at_swap(tmp_path, monkeypatch)
+    _crash_compact_at_swap(tmp_path, monkeypatch, capsys)
     after = _layers_listing(tmp_path)
     assert ORPHAN_LAYER not in after
     assert ORPHAN_TMP_MATCHED not in after
@@ -116,13 +128,10 @@ def test_crash_at_swap_sweeps_matched_orphans(tmp_path, monkeypatch):
             assert after[name] == before[name]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="docs/storage.md s3: orphan .tmp swept by next mutating command; "
-    "_sweep_orphans globs *.firn.tmp only, so stale-write.tmp survives (rev62 probe)",
-)
-def test_crash_at_swap_sweeps_stale_write_tmp(tmp_path, monkeypatch):
+def test_crash_at_swap_sweeps_stale_write_tmp(tmp_path, monkeypatch, capsys):
+    """docs/storage.md s3: ANY orphan .tmp is swept by the next mutating
+    command, including a bare name that is not <id>.firn.tmp."""
     _build_chain(tmp_path, 3)
     _plant_orphans(tmp_path)
-    _crash_compact_at_swap(tmp_path, monkeypatch)
+    _crash_compact_at_swap(tmp_path, monkeypatch, capsys)
     assert ORPHAN_TMP not in _layers_listing(tmp_path)

@@ -572,7 +572,11 @@ class Repo:
             )
         self.layers_dir = self.firn / "layers"
         self._db = self._connect()
-        self._cfg = self._load_config()
+        try:
+            self._cfg = self._load_config()
+        except BaseException:
+            self._db.close()
+            raise
 
     # -- lifecycle helpers
 
@@ -632,7 +636,16 @@ class Repo:
                 "history": {"reminder_threshold": "50"},
             }
         )
-        cfg.read(self.firn / "config")
+        # init writes this file as UTF-8; read it the same way on every
+        # platform (the locale default would garble a non-ASCII author name)
+        path = self.firn / "config"
+        try:
+            cfg.read(path, encoding="utf-8")
+        except (configparser.Error, UnicodeError) as exc:
+            raise FirnpackError(
+                f"cannot read {path}: {exc}. Fix the file, or delete it to "
+                f"fall back to the defaults."
+            ) from None
         return cfg
 
     @property
@@ -1677,7 +1690,7 @@ class Repo:
         (storage.md §6). An empty or table-less database file is
         re-schematized in place; a database file sqlite cannot open
         at all, or a missing one, must be replaced by an empty file
-        first (storage.md §6.4)."""
+        first (storage.md §6, step 4)."""
         # snapshot the branch names BEFORE the schema heals an empty file:
         # a missing/empty database has no names to read, so unknowable
         pre_branches: list[str] | None = None
@@ -2350,15 +2363,31 @@ class Repo:
 
     def _sweep_orphans(self) -> None:
         """Remove crash leftovers: stray .tmp files and layer files with no
-        DB row (SPEC §13). Referenced layers are never touched."""
-        for tmp in self.layers_dir.glob("*.firn.tmp"):
-            with contextlib.suppress(OSError):
+        DB row (SPEC §13). Referenced layers are never touched. A file that
+        cannot be removed (locked by OneDrive or antivirus) is reported on
+        stderr rather than silently kept; the next commit, amend or compact
+        tries again."""
+        stuck: list[str] = []
+        for tmp in list(self.layers_dir.glob("*.tmp")):
+            try:
                 tmp.unlink()
+            except OSError:
+                stuck.append(tmp.name)
         known = {row[0] for row in self._db.execute("SELECT id FROM layers")}
-        for layer_file in self.layers_dir.glob("*.firn"):
+        for layer_file in list(self.layers_dir.glob("*.firn")):
             if layer_file.stem not in known:
-                with contextlib.suppress(OSError):
+                try:
                     layer_file.unlink()
+                except OSError:
+                    stuck.append(layer_file.name)
+        if stuck:
+            print(
+                f"warning: could not remove leftover file(s) in "
+                f"{self.layers_dir}: {', '.join(sorted(stuck))} (they are not "
+                f"part of your history; the next commit, amend or compact "
+                f"will try again)",
+                file=sys.stderr,
+            )
 
     def status(self, *, full: bool = False, list_ignored: bool = False) -> dict:
         files, symlinks, ignored, nested = self._walk()
@@ -2501,7 +2530,29 @@ class Repo:
                 raise FirnpackError(
                     f"layer id prefix {ref!r} is ambiguous ({len(matches)} matches)"
                 )
+        if ref and len(ref) < 6 and all(c in "0123456789abcdef" for c in ref):
+            raise FirnpackError(
+                f"no branch named {ref!r}, and as a layer id it is too short "
+                f"(use at least 6 hex characters)"
+            )
         raise FirnpackError(f"no branch or layer named {ref!r}")
+
+    def _reachable(self, starts) -> set[str]:
+        """Every layer reachable from `starts` through parent and
+        second_parent links (the starts themselves included)."""
+        links = {
+            r[0]: (r[1], r[2])
+            for r in self._db.execute("SELECT id, parent, second_parent FROM layers")
+        }
+        seen: set[str] = set()
+        stack = [s for s in starts if s]
+        while stack:
+            lid = stack.pop()
+            if lid in seen:
+                continue
+            seen.add(lid)
+            stack.extend(p for p in links.get(lid, ()) if p)
+        return seen
 
     def branch(self, name: str, from_ref: str | None = None) -> dict:
         """Create a branch at HEAD (or at from_ref: branch name or id
@@ -3186,9 +3237,22 @@ def _cmd_delete_branch(args) -> int:
             return 1
         with repo._db:
             repo._db.execute("DELETE FROM branches WHERE name = ?", (args.name,))
+        remaining = [h for (h,) in repo._db.execute("SELECT head FROM branches")]
+        remaining += [x for x in (wt["head_id"], wt["merge_theirs"]) if x]
+        stranded = row[0] not in repo._reachable(remaining)
     finally:
         repo.close()
     print(f"deleted branch {args.name} (layers remain on disk)")
+    if stranded:
+        # documented in SPEC §9.4 / usage: deleting is allowed, silently
+        # stranding work is not
+        print(
+            f"warning: layer {row[0][:12]} (the tip of {args.name!r}) is no "
+            f"longer reachable from any branch or from where you are now. It "
+            f"stays on disk until a compact. To keep it: "
+            f"firnpack branch {args.name} {row[0][:12]}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -3346,6 +3410,46 @@ def main(argv=None) -> int:
         return 3
     except FirnpackError as exc:
         print(f"firnpack: {exc}", file=sys.stderr)
+        return 1
+    except BrokenPipeError:
+        raise
+    except sqlite3.OperationalError as exc:
+        text = str(exc)
+        if "no such table" in text or "no such column" in text:
+            # an empty or half-written database: store damage, not contention
+            print(
+                f"firnpack: integrity failure: glacier.db looks damaged "
+                f"({text}); run 'firnpack verify --rebuild-db' to rebuild "
+                f"the index from the layers",
+                file=sys.stderr,
+            )
+            return 3
+        print(
+            f"firnpack: the database could not be used ({text}). If another "
+            f"firnpack command, OneDrive or antivirus has it open, wait a "
+            f"moment and try again; run 'firnpack verify' if in doubt.",
+            file=sys.stderr,
+        )
+        return 1
+    except sqlite3.DatabaseError as exc:
+        print(
+            f"firnpack: integrity failure: glacier.db looks damaged ({exc}); "
+            f"run 'firnpack verify --rebuild-db' to rebuild the index from "
+            f"the layers",
+            file=sys.stderr,
+        )
+        return 3
+    except OSError as exc:
+        # a full disk, a read-only folder, a file held by OneDrive or
+        # antivirus: one plain sentence naming the file, never a traceback
+        where = f" ({exc.filename})" if exc.filename else ""
+        print(
+            f"firnpack: file system error: {exc.strerror or exc}{where}. "
+            f"Check that the disk has free space and that no other program "
+            f"(OneDrive, antivirus) is holding the file, then try again. "
+            f"Run 'firnpack verify' to confirm your history is intact.",
+            file=sys.stderr,
+        )
         return 1
 
 
