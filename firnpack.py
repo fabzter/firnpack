@@ -2393,6 +2393,12 @@ class Repo:
         files, symlinks, ignored, nested = self._walk()
         wt = self._worktree()
         cache = json.loads(wt["stat_cache"] or "{}")
+        if wt["merge_theirs"] is not None:
+            # Mid-merge the stat cache describes the files the merge itself
+            # just wrote (markers included), so the fast path would call a
+            # half-resolved worktree "clean". Drift is measured against the
+            # head layer (docs/usage.md), so rehash everything.
+            full = True
 
         head_manifest = {}
         if wt["head_id"]:

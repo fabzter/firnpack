@@ -17,7 +17,7 @@ operators), [`storage.md`](storage.md) (on-disk format and recovery),
 **JSON mode**: every command except `init`, `rename-branch` and `delete-branch`
 accepts `--json` and prints exactly one JSON object on stdout (human notes,
 when any, go to stderr). Shapes below are the `--json` payloads; optional
-keys are marked `[…]`.
+keys carry a `// [optional]` comment.
 
 ---
 
@@ -89,8 +89,10 @@ firnpack status [--full] [--ignored] [--json]
 ```
 
 Drift vs the head layer. Fast path uses the stat cache (size+mtime+mode);
-`--full` re-hashes everything. Ignored files are counted always and listed
-with `--ignored`.
+`--full` re-hashes everything. While a merge is pending, `status` always
+re-hashes (the files the merge wrote are measured against the head layer, so
+a marker-filled file is reported as `modified`, never as clean). Ignored files
+are counted always and listed with `--ignored`.
 
 JSON:
 

@@ -47,7 +47,9 @@
   extraction semantics, path separators, mtime granularity differ — this is a
   filesystem-heavy tool; Windows is the target OS).
 - `pip install -e .[dev]` → `ruff check` + `ruff format --check` → `pytest`.
-- Keep the suite fast (< 10 s) so it runs on the target laptop class too.
+- Keep the suite fast so it runs on the target laptop class too. (The original
+  "< 10 s" line is superseded by SPEC §22: < 10 min, owner amendment
+  2026-10-20; the CI legs are the binding gate.)
 
 ## Single-file discipline guard
 

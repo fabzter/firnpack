@@ -191,3 +191,42 @@ class TestAbortEdgeCases:
         with pytest.raises(FirnpackError, match="no merge is pending"):
             repo.merge_abort()
         repo.close()
+
+
+class TestStatusDuringPendingMerge:
+    """docs/usage.md: status is "drift vs the head layer". Mid-merge the
+    worktree holds marker-filled files the merge itself wrote, so the fast
+    stat-cache path used to call them clean (and an agent checking
+    `status.clean` would conclude there is nothing to resolve)."""
+
+    def _conflicted(self, project):
+        repo = Repo.init(project)
+        write(project, "shared.txt", "base\n")
+        repo.commit("base")
+        repo.branch("side")
+        repo.switch("side")
+        write(project, "shared.txt", "side\n")
+        repo.commit("side final")
+        repo.switch("main")
+        write(project, "shared.txt", "main\n")
+        repo.commit("main final")
+        assert repo.merge("side")["status"] == "conflict"
+        return repo
+
+    def test_fast_status_reports_the_marker_file_as_modified(self, project):
+        repo = self._conflicted(project)
+        fast = repo.status()
+        full = repo.status(full=True)
+        repo.close()
+        assert fast["merge_pending"] is True
+        assert fast["clean"] is False
+        assert fast["modified"] == ["shared.txt"]
+        assert fast["modified"] == full["modified"]
+
+    def test_status_is_clean_again_after_the_merge_is_aborted(self, project):
+        repo = self._conflicted(project)
+        repo.merge_abort()
+        st = repo.status()
+        repo.close()
+        assert st["merge_pending"] is False
+        assert st["clean"] is True
