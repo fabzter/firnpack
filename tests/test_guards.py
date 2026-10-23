@@ -113,3 +113,58 @@ class TestWorkflowGuards:
         assert any(v in ci for v in versions), (
             "release.yml builds on a Python the CI matrix never tests"
         )
+
+    def test_release_tag_version_gate(self):
+        rel = self._release()
+        # the tag gate reads the pushed tag name from the environment
+        assert "github.ref_name" in rel
+        assert 'os.environ["GITHUB_REF_NAME"]' in rel
+        # and compares it against pyproject and firnpack.__version__
+        assert "tomllib" in rel
+        assert "firnpack.__version__" in rel
+        assert 'f"v{version}"' in rel
+
+    def test_release_build_needs_test(self):
+        rel = self._release()
+        # a green test job is required before anything is built or published
+        assert "needs: test" in rel
+
+    def test_release_test_job_legs(self):
+        rel = self._release()
+        # SPEC 19: the floor on both OSes plus the newest supported
+        assert rel.count('py: "3.13.16"') == 2  # ubuntu floor + windows floor
+        assert "- os: ubuntu-latest" in rel
+        assert "- os: windows-latest" in rel
+        assert 'py: "3.15"' in rel  # newest supported, ubuntu
+
+    def test_release_artifact_guards(self):
+        rel = self._release()
+        # wheel: exactly firnpack.py plus dist-info (same check as ci.yml)
+        assert 'names == ["firnpack.py"]' in rel
+        # sdist: the documents ship (SPEC 18)
+        assert '"SPEC.md"' in rel
+        assert '"CHANGELOG.md"' in rel
+        assert '"/docs/"' in rel
+        assert '"/.github/workflows/"' in rel
+
+    def test_release_publish_environment(self):
+        rel = self._release()
+        assert "environment: pypi" in rel
+
+
+class TestProjectUrls:
+    def _urls(self) -> dict:
+        with open(ROOT / "pyproject.toml", "rb") as fh:
+            return tomllib.load(fh)["project"]["urls"]
+
+    def test_urls_point_at_the_repo(self):
+        urls = self._urls()
+        assert urls["Homepage"] == "https://github.com/fabzter/firnpack"
+        assert urls["Repository"] == "https://github.com/fabzter/firnpack"
+
+    def test_issue_and_changelog_urls(self):
+        urls = self._urls()
+        assert urls["Issues"] == "https://github.com/fabzter/firnpack/issues"
+        assert urls["Changelog"] == (
+            "https://github.com/fabzter/firnpack/blob/main/CHANGELOG.md"
+        )

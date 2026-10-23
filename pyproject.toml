@@ -26,6 +26,12 @@ classifiers = [
     "Topic :: Software Development :: Version Control",
 ]
 
+[project.urls]
+Homepage = "https://github.com/fabzter/firnpack"
+Repository = "https://github.com/fabzter/firnpack"
+Issues = "https://github.com/fabzter/firnpack/issues"
+Changelog = "https://github.com/fabzter/firnpack/blob/main/CHANGELOG.md"
+
 [project.scripts]
 firnpack = "firnpack:main"
 firn = "firnpack:main"

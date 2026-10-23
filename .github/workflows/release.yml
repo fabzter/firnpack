@@ -1,36 +1,110 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+ push:
+  tags: ["v*"]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.15"
-      - run: python -m pip install build
-      - run: python -m build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
+ test:
+  strategy:
+   fail-fast: false
+   matrix:
+    include:
+     - os: ubuntu-latest
+       py: "3.13.16"
+     - os: ubuntu-latest
+       py: "3.15"
+     - os: windows-latest
+       py: "3.13.16"
+  runs-on: ${{ matrix.os }}
+  steps:
+   - uses: actions/checkout@v5
+   - uses: actions/setup-python@v6
+     with:
+      python-version: ${{ matrix.py }}
+   - run: python -m pip install -e .[dev]
+   - run: ruff check .
+   - run: ruff format --check .
+   - run: python -m pytest tests/ -q
 
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    # trusted publishing (SPEC 19): OIDC federation to PyPI, bound to
-    # this repository + workflow filename; no API tokens in secrets
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - name: publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+ build:
+  needs: test
+  runs-on: ubuntu-latest
+  steps:
+   - uses: actions/checkout@v5
+   - uses: actions/setup-python@v6
+     with:
+      python-version: "3.15"
+   - name: tag must match the package version
+     # GITHUB_REF_NAME is the pushed tag (github.ref_name, e.g. v1.0.1)
+     run: |
+      python - <<'EOF'
+      import os, sys, tomllib
+      tag = os.environ["GITHUB_REF_NAME"]
+      with open("pyproject.toml", "rb") as fh:
+          version = tomllib.load(fh)["project"]["version"]
+      import firnpack
+      assert firnpack.__version__ == version, (
+          f"pyproject {version} != firnpack.__version__ "
+          f"{firnpack.__version__}"
+      )
+      if tag != f"v{version}":
+          sys.exit(
+              f"tag {tag} does not match package version v{version}; "
+              "bump pyproject/firnpack.__version__ or fix the tag"
+          )
+      print(f"tag {tag} matches version {version}")
+      EOF
+   - run: python -m pip install build
+   - run: python -m build
+   - name: wheel contains exactly one module
+     run: |
+      python - <<'EOF'
+      import zipfile, glob, sys
+      wheels = glob.glob("dist/*.whl")
+      assert wheels, "no wheel built"
+      names = [n for n in zipfile.ZipFile(wheels[0]).namelist()
+               if not n.startswith("firnpack-")]
+      assert names == ["firnpack.py"], names
+      print("wheel guard OK:", names)
+      EOF
+   - name: sdist ships the documents
+     run: |
+      python - <<'EOF'
+      import tarfile, glob
+      sdists = glob.glob("dist/*.tar.gz")
+      assert sdists, "no sdist built"
+      names = tarfile.open(sdists[0]).getnames()
+      for needle in (
+          "SPEC.md",
+          "CHANGELOG.md",
+          "/docs/",
+          "/.github/workflows/",
+      ):
+          assert any(needle in n for n in names), (
+              f"sdist misses {needle!r}"
+          )
+      print("sdist guard OK:", len(names), "members")
+      EOF
+   - uses: actions/upload-artifact@v4
+     with:
+      name: dist
+      path: dist/
+
+ publish:
+  needs: build
+  runs-on: ubuntu-latest
+  # PyPI trusted publishing needs no environment; naming one lets the owner add protection rules later
+  environment: pypi
+  # trusted publishing (SPEC 19): OIDC federation to PyPI, bound to
+  # this repository + workflow filename; no API tokens in secrets
+  permissions:
+   id-token: write
+   contents: read
+  steps:
+   - uses: actions/download-artifact@v4
+     with:
+      name: dist
+      path: dist/
+   - name: publish to PyPI
+     uses: pypa/gh-action-pypi-publish@release/v1
