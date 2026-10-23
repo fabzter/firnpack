@@ -2,6 +2,42 @@
 
 Hand-maintained (SPEC §24). Semver; releases on `v*` tags.
 
+## Unreleased
+
+### Fixed
+
+- A refused `compact` no longer touches `.firn/layers/`: stray leftovers
+  stay exactly as they were until the next command that is allowed to
+  sweep (`commit`, `amend`, or an executed `compact`).
+- The orphan sweep removes any stray `*.tmp` in `layers/`, not only
+  `<id>.firn.tmp`, and says so on stderr when a leftover cannot be removed
+  (OneDrive or antivirus holding it) instead of silently keeping it.
+- A full disk, a read-only folder, a file held by OneDrive or antivirus, a
+  busy or damaged database, and an unreadable config now end in one plain
+  `firnpack:` sentence with the documented exit code (1, or 3 for a damaged
+  database) and the way back (`firnpack verify`), never a traceback.
+- `.firn/config` is read as UTF-8 on every platform.
+- `delete-branch` warns when the deleted branch's tip is no longer reachable
+  from any branch or from where you are; layer-id prefixes shorter than 6
+  hex characters say so instead of "no branch named".
+- `commit` refuses a file literally named `__firnpack_meta__`.
+- `verify --rebuild-db` reports `lost_branches: null` (not `[]`) when the old
+  database was missing, empty or unreadable.
+
+### Documentation
+
+- SPEC, usage, storage, agent-contract and README now match shipped
+  behavior: orphan and sweep wording, `--json` scope, the 16-command
+  surface (`show` is deferred), the 255-character path refusal, `restore`
+  moving the head, and honest status notes where a ratified feature is not
+  implemented yet (symlink probe and `--flatten-symlinks`; the marker
+  guard outside a pending merge).
+
+### Tests
+
+- Windows-only exec-bit facts run on the windows-latest CI legs; the
+  carry-forward policy is also pinned on POSIX with a discriminating case.
+
 ## 1.0.0 — 2026-10-20
 
 First stable release: the complete v1.0 command surface, single-module

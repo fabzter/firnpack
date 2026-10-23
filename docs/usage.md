@@ -10,11 +10,11 @@ operators), [`storage.md`](storage.md) (on-disk format and recovery),
 | Code | Meaning |
 |---|---|
 | 0 | success (including "nothing to do" outcomes, which say so) |
-| 1 | refused or failed with a humane message (`firnpack: …` on stderr) — includes merge conflicts and drift guards |
+| 1 | refused or failed with a humane message (`firnpack: …` on stderr) — includes merge conflicts, drift guards, a full disk or a file held by OneDrive/antivirus, a busy database, an unreadable config |
 | 2 | command-line usage error (argparse) |
 | 3 | integrity failure (`verify`, or any command that hits a corrupt glacier) |
 
-**JSON mode**: every command except `rename-branch` and `delete-branch`
+**JSON mode**: every command except `init`, `rename-branch` and `delete-branch`
 accepts `--json` and prints exactly one JSON object on stdout (human notes,
 when any, go to stderr). Shapes below are the `--json` payloads; optional
 keys are marked `[…]`.
@@ -37,7 +37,9 @@ packed glacier ready at /home/me/proj/.firn
 no layers yet — pack your work with 'firnpack commit'
 ```
 
-Exit 1 if the directory is already a repository.
+Exit 1 if the directory is already a repository. Seeds a root `.gitignore`
+(one line, `~$*`) only when none exists; afterwards it is an ordinary
+tracked file.
 
 ## commit
 
@@ -47,9 +49,9 @@ firnpack commit [-m MSG] [--allow-markers] [--allow-flattened] [--json]
 
 Packs the tracked working tree into a new layer on the current head (branch
 or pin). With no `-m`, an honest auto-message is generated from the change
-set. Refuses (exit 1) when unresolved conflict markers are present unless
-`--allow-markers`; consumes a pending merge by recording `merge_theirs` as
-the new layer's second parent.
+set. Refuses (exit 1) when it would complete a pending merge while
+unresolved conflict markers remain, unless `--allow-markers`; consumes a
+pending merge by recording `merge_theirs` as the new layer's second parent.
 
 ```
 $ firnpack commit -m "chapters 1-3 draft"
@@ -166,16 +168,17 @@ Binary entries carry sizes instead of hunks. Empty `entries` = clean.
 
 ```
 firnpack branch NAME [FROM] [--json]      # create at HEAD or FROM
-firnpack switch REF [--json]              # branch name or layer-id prefix
+firnpack switch REF [--json]              # branch name, or layer-id prefix (>= 6 hex)
 firnpack list-branches [--json]
 firnpack rename-branch OLD NEW
 firnpack delete-branch NAME
 ```
 
 `branch` stays on the current branch. `switch` refuses on drift or pending
-merge (exit 1); switching to a layer-id prefix pins the worktree (commits
-while pinned advance the pin). `delete-branch` refuses for the branch you
-are on and warns when other heads become unreachable.
+merge (exit 1); switching to a layer-id prefix (at least 6 hex characters)
+pins the worktree (commits while pinned advance the pin). `delete-branch`
+refuses for the branch you are on, and warns on stderr when the deleted
+branch's tip is no longer reachable from any branch or from where you are.
 
 JSON — `branch`: `{"name": …, "head": "<40 hex>", "created": true}`.
 `switch`: `{"ref": …, "kind": "branch"|"pin", "head": "<40 hex>"}`.
@@ -213,7 +216,8 @@ JSON — outcomes:
 ```
 
 `conflict` exits 1 (the state is durable and recoverable, not an error in
-the repository). `--abort`: `{"status": "aborted", "rescue_layer": "<id>|null"}`.
+the repository). `--abort`: `{"status": "aborted", "head": "<40 hex>",
+"rescue_layer": "<id>|null"}`.
 
 ## amend
 
@@ -280,8 +284,10 @@ empty file first (`storage.md` §6).
 
 JSON (verify alone, success only): `{"status": "ok", "layers": 12}`.
 JSON (`--rebuild-db`): `{"status": "rebuilt", "layers": N,
-"main_head": "<40 hex>|null", "lost_branches": ["side"], "verify":
-{"status": "ok", "layers": N}}`.
+"main_head": "<40 hex>|null", "lost_branches": ["side"]|null, "verify":
+{"status": "ok", "layers": N}}`. `lost_branches` is `null` when the database
+was missing, empty or unreadable (the names are unknowable); `[]` only when a
+readable database held no other branches.
 
 ## compact
 
@@ -304,10 +310,12 @@ Rewrites, reports and guards (all visible, never silent):
   stubs of collapsed merges) are garbage-collected: archived with the
   dropped range when `--archive` is given, counted in
   `layers_garbage_collected` / `garbage_collected`;
-- refusals (exit 1, nothing mutated): pending merge; another branch head or
-  the pin inside the collapsed range; any reachable layer whose ancestry
-  passes through collapsed layers (the message names the branch); a kept
-  merge whose second parent falls below the cut;
+- refusals (exit 1, nothing mutated, `.firn/layers/` byte-identical —
+  stray leftovers included): pending merge; another branch head or the pin
+  inside the collapsed range; any reachable layer whose ancestry passes
+  through collapsed layers (the message names the branch when one points
+  there; a merge edge is cleared only by a higher `--keep`); a kept merge
+  whose second parent falls below the cut;
 - peak-disk need is checked up front and reported in the plan.
 
 JSON — plan:

@@ -39,6 +39,9 @@ These never mutate the repository or worktree, in any state:
 | permission refusal | 1 | "pass --yes", "--keep must be" | stop; obtain explicit human parameters |
 | integrity failure | 3 | `firnpack: integrity failure:` + problem list | stop writes; run `verify`; follow `storage.md` recovery |
 | usage error | 2 | argparse text | fix the invocation |
+| file system error | 1 | `firnpack: file system error:` + the OS reason and file | stop; free disk space or close whatever holds the file (OneDrive, antivirus); run `verify`; retry |
+| database busy | 1 | `firnpack: the database could not be used` | another command or a sync client has `glacier.db` open; wait and retry; never parallelize |
+| unreadable config | 1 | `firnpack: cannot read …/.firn/config` | fix or delete the named file (defaults apply); do not edit it blindly |
 
 Refusals are **atomic**: the repository and worktree are byte-identical
 after them (rescue-layer additions excepted, and reported).
@@ -63,16 +66,19 @@ after them (rescue-layer additions excepted, and reported).
 5. **Verify after external events.** After copying a repository, after a
    power loss, or before trusting an old clone: run `verify`. Exit 3 lists
    every problem; do not write to a repository that fails verify.
-6. **Treat ids as opaque.** Layer ids are 40-hex content hashes; prefixes
-   resolve uniquely or error ("ambiguous"). Never construct or truncate ids
+6. **Treat ids as opaque.** Layer ids are 40-hex content hashes; prefixes of
+   at least 6 hex characters resolve uniquely or error ("ambiguous"; a
+   shorter one is refused as "too short"). Never construct or truncate ids
    yourself.
 7. **Pins are heads.** `switch <layer-id>` pins; commits while pinned advance
    the pin (no detached-HEAD failure mode). `status.head.kind` tells you
    which world you are in.
 8. **Recovery is explicit.** `verify --rebuild-db` is the only command
-   that reconstructs the database; it names every branch it drops and
-   refuses on corrupt or parent-missing layers. Report `lost_branches`
-   to the human; never present a rebuild as lossless.
+   that reconstructs the database; it names every branch it can still read
+   and refuses on corrupt or parent-missing layers. Report `lost_branches`
+   to the human; never present a rebuild as lossless. `lost_branches` is
+   `null` (not `[]`) when the old database was missing, empty or unreadable:
+   the names are then unknowable, which is not the same as "none were lost".
 
 ## 5. JSON schemas (normative top level)
 
@@ -93,7 +99,7 @@ restore   {status: restored|exported, layer_id, rescue_layer?, to?}
 export    {status: exported, layer_id, to}
 verify    {status: ok, layers}            (failures exit 3, no JSON)
           --rebuild-db → {status: rebuilt, layers, main_head,
-          lost_branches[], verify: {status, layers}}
+          lost_branches[]|null, verify: {status, layers}}
 compact   plan      {status: plan, keep, layers_total, layers_dropped,
                      layers_rewritten, off_chain_rewritten,
                      layers_garbage_collected, branches_remapped:

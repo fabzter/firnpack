@@ -107,14 +107,14 @@ storage question. Findings are recorded in `research/` and must inform SPEC.md:
   availability — the evidence base for the 3.13.16+ floor (SPEC §18) and the
   §5 extraction-safety layers.
 
-## 6. Repository / workspace layout (planned)
+## 6. Repository / workspace layout
 
 ```
 firnpack/
 ├── AGENTS.md          ← this file: initial context, constraints, identity
 ├── SPEC.md            ← product + storage format + command spec (living doc)
 ├── research/          ← web-research findings backing SPEC decisions
-├── firnpack.py        ← (planned) the entire implementation, one file
+├── firnpack.py        ← the entire implementation, one file
 ├── tests/             ← pytest suite
 ├── pyproject.toml     ← minimal single-module packaging, [project.scripts] entry
 ├── .github/workflows/ ← ci.yml (lint + test matrix), release.yml (trusted publish)
@@ -163,7 +163,7 @@ firnpack/
 - [x] firnpack.py implementation — M1 + M2 complete: all 16 v1.0 commands
       (init, commit, status, history, diff, branch, switch, list-branches,
       rename-branch, delete-branch, merge, amend, restore, export, verify,
-      compact) plus `verify --rebuild-db`; 225 tests green (unit + property
+      compact) plus `verify --rebuild-db`; full suite green (unit + property
       + seeded fuzz + e2e CLI + docs/guard suites), ruff clean
 - [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main;
       release.yml (trusted publishing) fired: **v1.0.0 on PyPI**

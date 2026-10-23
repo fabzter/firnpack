@@ -67,9 +67,11 @@ advisory, not load-bearing. Pointer: SPEC §5, §18, Q19.
 
 On Windows, committing symlinks probes creation capability; failure refuses
 with a message that pre-lists every symlink and the remedies;
-`--allow-flattened`/`--flatten-symlinks` stores copies as regular files,
+`--allow-flattened` stores copies as regular files,
 records `flattened_paths` in the layer, surfaces pending flattens in
-`status`, and echoes at commit. Rationale: never silent persistence-chain
+`status`, and echoes at commit. (1.0.0 ships this commit-side half; the
+symlink probe and `--flatten-symlinks` are specified but not implemented
+yet — SPEC §5 status note.) Rationale: never silent persistence-chain
 changes. Pointer: SPEC §5, Q20.
 
 ## D-11 — CI: keep `ubuntu-latest` unpinned (2026-10-18, ratified; noted 2026-10-20)
@@ -156,7 +158,7 @@ Owner decision on O-01: ship the flag in v1.0 rather than defer.
 newest `created_at`, ties by id — tip-preference refines the Q9
 tie-break so a same-second tie cannot orphan the true head), resets
 the worktree row, names every lost branch, and refuses on corrupt or
-parent-missing layers. Pointer: SPEC §9.8/§13, Q9; docs/storage.md §6.4.
+parent-missing layers. Pointer: SPEC §9.8/§13, Q9; docs/storage.md §6 (step 4).
 
 ## Open (not settled)
 

@@ -271,8 +271,8 @@ storage model to a non-developer (layer, drift, packing).
 **Invariants**
 
 - Each layer file's name **is** the `layer_id`: SHA-256 (first 20 bytes, 40 hex
-  chars) of the layer's full canonical pre-compression payload (§5).
-  Self-certifying: `verify` = recompute + compare.
+  chars) of the layer's canonical commit record — tree id, parents, message,
+  author, time (§5). Self-certifying: `verify` = recompute + compare.
 - `glacier.db` is the only file ever rewritten. All repo state — including the
   current head — lives in it, so every command is a single atomic SQLite
   transaction. (No `HEAD` sidecar file: a second mutable file could disagree with
@@ -456,6 +456,12 @@ the explicit opt-in that materializes links as copies, loudly. Layers are
 data-at-rest for a non-developer; hostile layer files must not be able to
 write outside the destination.
 
+> **Status in 1.0.0**: the symlink-capability probe, the refusal message and
+> `restore|export --flatten-symlinks` described above are specified but not
+> implemented yet. The commit-side half of the chain (`--allow-flattened`,
+> `flattened_pending`, the `flattened_paths` meta field) exists. Whether to
+> implement the front half or de-scope it is an open owner decision.
+
 **Agent-continuation contract for the refusal and the flatten path (owner
 amendment, 2026-10-18 — "give good documentation/output so the agent can
 keep working if it needs to flatten")**: the refusal is not a dead end.
@@ -512,7 +518,7 @@ CREATE TABLE layers (
     message       TEXT NOT NULL,
     author        TEXT NOT NULL,
     created_at    TEXT NOT NULL,      -- UTC ISO-8601
-    profile       TEXT NOT NULL,      -- 'zstd' | 'gzip' (this layer's codec)
+    profile       TEXT NOT NULL,      -- 'gzip' (v1.0: gzip only; zstd reserved)
     file_count    INTEGER NOT NULL,
     size          INTEGER NOT NULL    -- compressed size, bytes
 );
@@ -609,8 +615,9 @@ profiles across history are always readable regardless of this setting.
 
 ## 8. Command set
 
-A non-developer's daily loop is 5 commands; the full v1 surface is 17. An agent
-uses the same 17 plus `--json`.
+A non-developer's daily loop is 5 commands; the shipped v1.0.0 surface is 16
+(the 17th, `show`, is specified below but deferred past 1.0.0). An agent
+uses the same 16 plus `--json`.
 
 | Group | Command | Does | git analog |
 |---|---|---|---|
@@ -619,7 +626,7 @@ uses the same 17 plus `--json`.
 | core | `history [-n N] [--all] [BRANCH]` | commits newest-first, tips marked | `git log` |
 | core | `status [--full]` | drift vs head layer | `git status` |
 | core | `diff` | unified drift diff (worktree ↔ head) | `git diff` |
-| core | `show <id>` | one commit: meta + manifest (+ diff vs parent) | `git show` |
+| core | `show <id>` | *deferred past 1.0.0 (not shipped)* — one commit: meta + manifest (+ diff vs parent) | `git show` |
 | branching | `branch <name> [FROM]` | create branch at head or commit | `git branch n [sha]` |
 | branching | `switch <name\|id>` | move worktree to branch or pin | `git switch` |
 | branching | `merge <branch>` | 3-way merge into current (§10) | `git merge` |
@@ -646,6 +653,9 @@ Implementation order: core group first (M1), branching+safety+mgmt second (M2).
 Create `.firn/`, `layers/`, empty DB (schema above), `config` with defaults.
 No initial layer (empty repo, like git). `status` on an empty repo: *"no layers
 yet — pack your work with `firnpack commit`"*.
+
+`init` also seeds a root `.gitignore` containing `~$*` (office lock files),
+only when none exists (Q2); it is an ordinary tracked file afterwards.
 
 ### 9.2 commit (packing)
 
@@ -681,6 +691,9 @@ yet — pack your work with `firnpack commit`"*.
    (or `[core] allow_flattened = true`); `commit` echoes the pending list
    and records it in the layer's `flattened_paths` meta field (§5) —
    auditable in history, never silent.
+   > **Status in 1.0.0**: the marker guard in this step applies to the
+   > pending-merge case only, and signals refusal by message and exit 1, not
+   > by a `blocked_by_markers` JSON key (see §11 status note).
 7. Identical-record edge: same tree, message, author, parents, and timestamp
    hash to the same `layer_id` — second write is a no-op (file exists, DB row
    insert-or-ignore); correct dedup. Different message/parents/time → distinct
@@ -703,6 +716,7 @@ Resolve/abort the merge first.
   `git branch`); `switch` to move.
 - `branch <name> <from>` — from a specific commit: `FROM` is a layer_id prefix
   (≥ 6 hex, must be unambiguous) or a branch name.
+  Branch names are non-empty, contain no `/`, and do not start with `.`.
 - `switch <branch>` — refuses (exit 1, no mutation) if there is drift; the user
   must `commit` (or `restore`/`export` to discard — rescue pack makes this safe).
   No auto-snapshot (Q4).
@@ -726,13 +740,15 @@ merge layers show both parents. `--json` mirrors it.
 - `diff` — worktree ↔ head layer; `difflib.unified_diff` on UTF-8 (decoded with
   `errors='replace'`); binaries → *"binary file differs (size a → b)"*.
 - `show <id>` — meta + file manifest + optional diff vs first parent.
+  *Deferred past 1.0.0 — not shipped.*
 
 ### 9.7 restore / export
 
-- `restore <id|head> [--to DIR]` — if drift exists, first write a **rescue
+- `restore <ref> [--to DIR]` — if drift exists, first write a **rescue
   layer** (tree = current worktree, parent = current head layer, message
   *"auto: drift rescue before restore"*) so nothing is ever lost; then extract
-  the target layer over the worktree (safe-extract, §5) and sync `worktree`
+  the target layer over the worktree (safe-extract, §5), move the head (the
+  current branch head, or the pin) to it, and sync `worktree`
   (snapshot/stat_cache). `--to DIR` extracts elsewhere without touching the
   worktree.
 - `restore` **refuses while a merge is pending** (exit 1): the marked-up
@@ -824,7 +840,7 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
 - **Peak-disk check (up front, before any write)**: compact writes the
   foundation + N rewritten kept layers **before** deleting old files, so
   peak need ≈ old-layers total + (N+1) layer writes. `--dry-run` reports
-  it (*"peak disk needed: ~X MB (writes Y MB before freeing Z)"*), and
+  it as `peak_disk_needed` (bytes; the plan also lists `bytes_reclaimed`), and
   real runs **refuse** when free space on the volume is below the peak,
   with the humane message: compact writes new layers before deleting old
   ones (crash-safety, § below); free up space, or copy the repo folder
@@ -860,7 +876,7 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
 - **Reminder (owner requirement)**: after a commit, if total layer count
   crosses `[history] reminder_threshold` (default 50) and no reminder was
   shown since the last crossing, `commit` prints one line (human: *"glacier
-  holds N layers (~X MB) — `firnpack compact` can shrink it"*; JSON:
+  holds N layers (~SIZE) — `firnpack compact` can shrink it"*; JSON:
   `"history_reminder"`), recorded in `config` — rate-limited to once per
   crossing, never nagging.
 
@@ -928,6 +944,11 @@ cases; the algorithm is the boring, correct one:
   `commit --allow-markers`. Scan matches lines starting `<<<<<<<` or
   `>>>>>>>` only; `=======` alone is excluded (markdown/RST false
   positives).
+  > **Status in 1.0.0**: the guard runs only while completing a pending merge
+  > (the case above). A plain `commit` with marker-shaped lines in an ordinary
+  > worktree is not scanned, and the refusal is the stderr message plus exit 1
+  > — the `"blocked_by_markers"` JSON key is not emitted. Extending the guard
+  > to every commit, or emitting the key, is an open owner decision.
 
 ## 12. Status & change detection
 
@@ -965,20 +986,24 @@ machine, `--full` is cheap at small-project scale.
   5. *then* the SQLite transaction (`synchronous=FULL`) recording the layer and
      moving the head.
   Crash at any point leaves nothing (pre-replace) or a fully durable orphan
-  layer file (pre-DB). Orphan rows never exist; orphan files are ignored by
-  `verify` and swept by the next commit. The repo is always at its previous or
-  its new commit — never between.
+  layer file (pre-DB). Orphan rows never exist; an orphan `.firn` file is
+  listed by `verify` (so nothing vanishes unobserved) and swept, together
+  with any stray `*.tmp`, by the next `commit`, `amend` or `compact`. A
+  leftover that cannot be removed (OneDrive or antivirus holds it) is
+  reported on stderr and retried next time. The repo is always at its
+  previous or its new commit — never between.
 - **Windows/OneDrive replace retries**: `os.replace` (and DB open) can raise
   `PermissionError` when OneDrive or antivirus holds a handle — the exact
   target environment. Writers retry with bounded backoff (5 attempts, 0.2 s →
   2 s), then fail with a humane message naming the likely culprit (sync/AV
   lock) and the safe next step (retry; nothing was corrupted).
-- **Windows path length (MAX_PATH)**: Windows 11 still caps paths at 260
-  chars unless LongPathsEnabled is set. `commit` validates tracked paths
-  pre-write and warns (does not block) when a full path would exceed ~240
-  chars; extraction of such paths fails unless long paths are enabled — the
-  README documents the one-time registry setting. Caught at pack time, not
-  discovered at restore time years later.
+- **Path length**: Windows 11 still caps paths at 260 chars unless
+  LongPathsEnabled is set. `commit` validates tracked paths pre-write: a
+  full on-disk path past ~240 chars **warns** (does not block;
+  `maxpath_warning`), and a tracked path longer than 255 characters is
+  **refused** (exit 1, nothing written) because the archive format cannot
+  store it. Extraction of long paths fails on Windows unless long paths are
+  enabled. Caught at pack time, not discovered at restore time years later.
 - **Atomic state**: every command = one SQLite transaction (single mutable
   file; `synchronous=FULL`). Crash mid-commit leaves at worst an orphan tmp
   file and no DB row — the repo is simply at its previous commit.
@@ -1041,18 +1066,22 @@ unmeasured numbers in shipped docs.
 - Exit codes: **0** success · **1** user-facing error (drift-blocked switch,
   merge conflict, not-a-repo…) · **2** argparse usage error · **3** integrity
   failure (verify). Stable across v1; documented in `docs/agent-contract.md`.
-- `--json` on every command that produces output; shapes are part of the test
-  contract (§22).
+- `--json` on every command that produces structured output — all except
+  `init`, `rename-branch` and `delete-branch`, which print one human line;
+  shapes are part of the test contract (§22).
 - `--version`, `--help` standard. No `--quiet` (fewer flags, fewer questions).
 
 ## 17. Python API
 
 `from firnpack import Repo` — the CLI is a thin wrapper. Methods mirror commands
-1:1 (`repo.commit(msg=None) -> str` layer_id; `repo.merge(branch) ->
-MergeResult`…). Typed exceptions: `FirnpackError` base, `NotARepoError`,
-`DriftError`, `MergeConflict(paths…)`, `IntegrityError(path, expected, got)`.
-Agents may import the module directly (the skill file documents both paths: CLI
-for humans, API for agents). Full signatures in `docs/api.md`.
+1:1 and return the same dict the command prints under `--json`
+(`repo.commit(message=None) -> {status, layer_id, …}`;
+`repo.merge(branch) -> {status, …}`). Typed exceptions: `FirnpackError` base,
+`NotARepoError`, `DriftError`, `MergeConflict(paths)`, and `IntegrityError`
+(message only). Agents may import the module directly (the skill file documents
+both paths: CLI for humans, API for agents). v1.0.0 ships no separate API
+reference: `docs/agent-contract.md` §5 lists the shapes, and the method
+signatures are in the module itself.
 
 ## 18. Packaging & distribution
 
@@ -1241,8 +1270,8 @@ commit/branch/merge sequences asserting invariants:
 
 Suite must run < 10 min locally (owner amendment 2026-10-20: the earlier
 10 s figure predated the e2e subprocess journeys and the seeded compact
-fuzz and no longer reflected reality — measured ~16 s / 210 tests on a
-2020s arm64 laptop; the CI matrix legs are the binding gate). No fixtures
+fuzz and no longer reflected reality — measured under 30 s on a 2020s
+arm64 laptop (2026-10-22; ~16 s on 2026-10-20); the CI matrix legs are the binding gate). No fixtures
 in wheels.
 
 ## 23. Performance targets (soft, unmeasured)

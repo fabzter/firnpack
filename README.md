@@ -66,7 +66,8 @@ the head layer without adding a new one.
 | `firnpack verify` | re-hash every layer; check database consistency |
 | `firnpack compact --keep N [--dry-run] [--yes] [--archive DIR]` | squash old layers, reclaim disk |
 
-Every command accepts `--json` for machine-readable output — firnpack is
+Every command except `init`, `rename-branch` and `delete-branch` accepts
+`--json` for machine-readable output — firnpack is
 designed to be operated by people *and* by agents; see
 [`docs/agent-contract.md`](docs/agent-contract.md) for the normative
 contract.
@@ -95,7 +96,7 @@ with drift in the worktree it refuses instead.
 ## Checking the glacier
 
 `firnpack verify` re-hashes every layer against its own filename, cross-checks
-the database, and reports dangling references or orphan files. It is the
+the database, and reports dangling references or orphan layer files. It is the
 answer to "is my history still sound?" after a power cut, a disk scare, or a
 copy between machines. If the database itself is lost or corrupt,
 `verify --rebuild-db` reconstructs it from the layers themselves — and says
@@ -135,6 +136,10 @@ Excluded files are never silently hidden: `status` counts them, and
 
 - A commit either happens completely or not at all. A power cut mid-pack
   leaves your repository exactly as it was.
+- Disk trouble — a full drive, a file held open by OneDrive or antivirus —
+  ends in one plain sentence that names the problem and the way back
+  (`firnpack verify` confirms your history is intact), never a wall of
+  technical text.
 - Every layer carries its own checksum, and the layer's *name* is that
   checksum — tampering or disk rot is detectable by re-reading.
 - Extraction of a layer is guarded: a corrupt or hostile archive can never

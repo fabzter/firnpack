@@ -17,8 +17,10 @@ project/
 └── …worktree…
 ```
 
-File count invariant: **N_commits + 2** (layers plus the database and the
-config), plus transient `.tmp` files during writes. There is no object
+File count: **N_commits + 2** for a history of plain commits (one layer file
+per layer row, plus the database and the config), and transient `.tmp`
+files during writes. `amend` and the rescue layer of `restore` add layer
+rows that stay until `compact` collects them. There is no object
 store, no reflog, no packed refs.
 
 `config` keys (all optional with defaults): `user.name` (author string;
@@ -79,8 +81,9 @@ paths ≤ 100 chars (ustar prefix splitting, then a pax `path` record
 beyond); identity comes from content, never from clock or owner.
 
 Write path: `layers/<id>.firn.tmp` → fsync → atomic `os.replace`. A crash
-leaves an orphan `.tmp`/`.firn`, which the next mutating command sweeps;
-orphans are ignorable garbage by construction.
+leaves an orphan `.tmp`/`.firn`, which the next `commit`, `amend` or
+`compact` sweeps (any `*.tmp` in `layers/`, and any `.firn` with no database
+row); orphans are ignorable garbage by construction.
 
 ## 4. The two hashes
 
@@ -118,7 +121,10 @@ mode is cached so `chmod ±x` shows as drift without a re-hash.
    from any backup, archive zip (`compact --archive`), or another machine
    can be dropped into `layers/` under its id; `verify` confirms it.
 3. **Orphan files**: swept automatically by the next `commit`/`amend`/
-   `compact`; `verify` lists them first so nothing vanishes unobserved.
+   `compact` (any stray `*.tmp`, and any `.firn` with no database row);
+   `verify` lists orphan `.firn` files first so nothing vanishes
+   unobserved. A refused command never sweeps, and a leftover that cannot be
+   removed is reported on stderr and retried next time.
 4. **Lost or corrupt database**: layers are self-describing.
    `firnpack verify --rebuild-db` reconstructs the `layers` table from
    each file's in-band `__firnpack_meta__` (id = filename; `file_count`
