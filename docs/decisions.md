@@ -195,8 +195,14 @@ Pointer: SPEC §9.7.
 
 Keep `environment: pypi` in the release workflow alongside its test,
 tag/version and artifact gates. This retains the local workflow change;
-it does not authorize a push, version bump, tag or publish. Live
-environment protection rules have not been verified.
+it does not authorize a push, version bump, tag or publish.
+
+Read-only deployment check, 2026-10-23:
+`gh api repos/fabzter/firnpack/environments --jq '{total_count, names:
+[.environments[].name]}'` returned `{"names": [], "total_count": 0}`.
+The named environment does not exist yet, so no environment protection
+rules are configured. The PyPI trusted-publisher binding has not been
+revalidated. No remote configuration was changed.
 
 ## Open (not settled)
 
