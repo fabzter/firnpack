@@ -72,10 +72,10 @@ On Windows, committing symlinks probes creation capability; failure refuses
 with a message that pre-lists every symlink and the remedies;
 `--allow-flattened` stores copies as regular files,
 records `flattened_paths` in the layer, surfaces pending flattens in
-`status`, and echoes at commit. (1.0.0 ships this commit-side half; the
-symlink probe and `--flatten-symlinks` are specified but not implemented
-yet — SPEC §5 status note.) Rationale: never silent persistence-chain
-changes. Pointer: SPEC §5, Q20.
+`status`, and echoes at commit. Scope, decided 2026-10-22 (owner): the
+probe, the refusal and `--flatten-symlinks` are deferred past 1.0 (designed,
+not implemented); only the commit-side half ships. Rationale: never silent
+persistence-chain changes. Pointer: SPEC §5, Q20.
 
 ## D-11 — CI: keep `ubuntu-latest` unpinned (2026-10-18, ratified; noted 2026-10-20)
 

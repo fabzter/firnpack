@@ -188,6 +188,28 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
             time.sleep(0.2 * (2**attempt))
 
 
+def _symlink(fp: Path, target: str) -> None:
+    """Create a symbolic link, or say plainly why not.
+
+    On Windows creating a link needs Developer Mode or an administrator
+    account; without it the OS refuses with "a required privilege is not
+    held". That is not a disk or sync problem, so it must not be reported
+    as one. (The designed probe-and-flatten flow is deferred past 1.0 —
+    SPEC §5; this only makes the failure honest.)"""
+    try:
+        fp.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise FirnpackError(
+            f"cannot create the symbolic link {fp.name!r} -> {target!r}: "
+            f"{reason}. On Windows this needs Developer Mode (Settings → "
+            f"Privacy & security → For developers) or an administrator "
+            f"account; otherwise use a machine that allows symbolic links. "
+            f"Your history was not changed; 'firnpack status' shows which "
+            f"files were already written."
+        ) from None
+
+
 _WARNED_PATCH = False
 
 
@@ -1258,7 +1280,7 @@ class Repo:
             if target is not None:
                 if fp.exists() or fp.is_symlink():
                     fp.unlink()
-                fp.symlink_to(target)
+                _symlink(fp, target)
                 st = fp.lstat()
                 stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
             else:
@@ -1595,7 +1617,7 @@ class Repo:
             fp = dest / path
             fp.parent.mkdir(parents=True, exist_ok=True)
             if v["target"] is not None:
-                fp.symlink_to(v["target"])
+                _symlink(fp, v["target"])
             else:
                 fp.write_bytes(contents[path])
                 mode = v.get("mode", 0o644)
@@ -2668,7 +2690,7 @@ class Repo:
             if v["target"] is not None:
                 if fp.exists() or fp.is_symlink():
                     fp.unlink()
-                fp.symlink_to(v["target"])
+                _symlink(fp, v["target"])
                 st = fp.lstat()
                 stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
                 entries[path] = (

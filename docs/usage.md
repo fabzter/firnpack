@@ -255,6 +255,15 @@ rescue layer before anything is overwritten, and the output names it.
 `--to DIR` extracts without touching the worktree or the head (same
 semantics as `export`). Refuses mid-merge.
 
+**Symbolic links (known limitation, deferred past 1.0)**: if the layer holds
+symlinks and this account cannot create them (Windows without Developer Mode
+or administrator rights), `restore`, `export` and `merge` stop at the first
+link with a plain message and exit 1; history is not changed, files written
+before that point stay on disk, and for `restore` any uncommitted work was
+already packed as a rescue layer. Enable Developer Mode or use a machine that
+allows symlinks. A probe-first refusal and a `--flatten-symlinks` opt-in are
+designed (SPEC §5) but not implemented.
+
 JSON: `{"status": "restored", "layer_id": "<40 hex>",
 "rescue_layer": "<40 hex>|null"}` or, with `--to`,
 `{"status": "exported", "layer_id": "<40 hex>", "to": "<dir>"}`.

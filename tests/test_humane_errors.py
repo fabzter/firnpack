@@ -168,3 +168,43 @@ def test_too_short_layer_id_says_how_many_characters(repo_dir, capsys):
     assert rc == 1
     _assert_one_humane_line(err)
     assert "at least 6 hex characters" in err
+
+
+def _deny_symlinks(monkeypatch):
+    """What Windows does to an account without Developer Mode: the OS
+    refuses to create the link with 'a required privilege is not held'."""
+
+    def refuse(self, target, target_is_directory=False):
+        raise OSError(1314, "A required privilege is not held by the client", str(self))
+
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a real symlink to commit")
+@pytest.mark.parametrize("command", ["restore-over", "restore-to", "export"])
+def test_symlink_privilege_failure_is_named_honestly(
+    repo_dir, monkeypatch, capsys, command
+):
+    """A refused symlink must not be blamed on the disk or OneDrive: say
+    that links need Developer Mode (or an administrator), exit 1, one line,
+    and leave history alone."""
+    (repo_dir / "real.txt").write_text("data\n", encoding="utf-8")
+    (repo_dir / "link.txt").symlink_to("real.txt")
+    repo = firnpack.Repo.discover()
+    head = repo.commit("with link")["layer_id"]
+    repo.close()
+    layers = sorted(p.name for p in (repo_dir / ".firn" / "layers").iterdir())
+    _deny_symlinks(monkeypatch)
+    argv = {
+        "restore-over": ["restore", head[:12]],
+        "restore-to": ["restore", head[:12], "--to", str(repo_dir / "out")],
+        "export": ["export", head[:12], "--to", str(repo_dir / "exp")],
+    }[command]
+    rc, err = _run(capsys, *argv)
+    assert rc == 1, err
+    _assert_one_humane_line(err)
+    assert "symbolic link" in err
+    assert "Developer Mode" in err
+    assert "file system error" not in err  # not a disk problem
+    assert "OneDrive" not in err
+    assert sorted(p.name for p in (repo_dir / ".firn" / "layers").iterdir()) == layers

@@ -456,11 +456,12 @@ the explicit opt-in that materializes links as copies, loudly. Layers are
 data-at-rest for a non-developer; hostile layer files must not be able to
 write outside the destination.
 
-> **Status in 1.0.0**: the symlink-capability probe, the refusal message and
-> `restore|export --flatten-symlinks` described above are specified but not
-> implemented yet. The commit-side half of the chain (`--allow-flattened`,
-> `flattened_pending`, the `flattened_paths` meta field) exists. Whether to
-> implement the front half or de-scope it is an open owner decision.
+> **Decided 2026-10-22 (owner): deferred past 1.0.** The symlink-capability
+> probe, the refusal message and `restore|export --flatten-symlinks`
+> described above are **not implemented** in 1.0.x; this section is the
+> design for a future release. The commit-side half of the chain
+> (`--allow-flattened`, `flattened_pending`, the `flattened_paths` meta
+> field) exists. Known limitation today: see docs/usage.md (restore).
 
 **Agent-continuation contract for the refusal and the flatten path (owner
 amendment, 2026-10-18 — "give good documentation/output so the agent can
@@ -1224,7 +1225,9 @@ commit/branch/merge sequences asserting invariants:
 - commit-with-leftover-markers: blocks by default (exit 1), warns with
   `block_unresolved_markers = false`, commits with `--allow-markers`
   (three-state guard, all legs executed);
-- flatten persistence chain: `restore --flatten-symlinks` → `status`
+- flatten persistence chain *(commit-side half implemented; the
+  `--flatten-symlinks` front half is deferred past 1.0)*:
+  `restore --flatten-symlinks` → `status`
   reports pending flattens (human + JSON) → `commit` without
   `--allow-flattened` refuses → with it, commits and records
   `flattened_paths` in meta → follow-up `verify` sees the record;
@@ -1236,7 +1239,8 @@ commit/branch/merge sequences asserting invariants:
   3.13.16 warns, 3.14.x warns through 3.14.8 (unconfirmed), 3.15.0 never;
 - Windows-unsafe member names (backslash, `C:`, UNC, CON, COM1, NUL, …)
   rejected by the full pre-pass with **zero files written**;
-- symlink probe: layer with symlinks + failed probe → refuse with the
+- symlink probe *(deferred past 1.0 — not implemented)*: layer with
+  symlinks + failed probe → refuse with the
   humane message; `--flatten-symlinks` materializes copies and reports
   each path; probe success → links recreated;
 - compact: `--dry-run` mutates nothing; `--keep 1` squashes to one layer
@@ -1358,7 +1362,9 @@ Semver; 0.x until 1.0; releases on `v*` tags; CHANGELOG.md by hand.
   unpatched builds. **Flatten-persistence chain** (§5/§9.2/§12/§22: status
   echo, `--allow-flattened` commit gate, `flattened_paths` meta field,
   `flattened_pending` DB state, tests) — **RATIFIED by owner 2026-10-19**
-  (post-close ratification).
+  (post-close ratification). **Scope decided 2026-10-22 (owner): the probe,
+  the refusal and `--flatten-symlinks` are deferred past 1.0 — kept here as
+  the design for a future release, not implemented.**
 - **Q18 — bytes budget — RESOLVED 2026-10-18 (owner)**: accepted (~2–6 MB
   per layer at a 10 MB tree; 0.2–0.6 GB per 100 commits). This directly
   produced the new owner requirement: **`compact`** (§9.9) — squash old
