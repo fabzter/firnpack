@@ -703,6 +703,22 @@ class TestOrphanSweep:
         assert not (layers / f"{'0' * 40}.firn").exists()
         assert (layers / f"{r1['layer_id']}.firn").is_file()
 
+    def test_bare_tmp_is_swept_too(self, project):
+        """docs/storage.md §3: a crash leaves an orphan `.tmp`; ANY stray
+        *.tmp in layers/ goes, not only the <id>.firn.tmp spelling."""
+        write(project, "a.txt", "one\n")
+        repo = Repo.init(project)
+        r1 = repo.commit("first")
+        repo.close()
+        layers = project / ".firn" / "layers"
+        (layers / "stale-write.tmp").write_bytes(b"partial junk")
+        write(project, "a.txt", "one\ntwo\n")
+        repo = Repo.discover()
+        repo.commit("second")
+        repo.close()
+        assert not (layers / "stale-write.tmp").exists()
+        assert (layers / f"{r1['layer_id']}.firn").is_file()
+
 
 def _retarget(root: Path):
     (root / "link.txt").unlink()
@@ -888,3 +904,27 @@ class TestWindowsCarryForward:
         repo.close()
         assert manifest["run.bat"]["mode"] == 0o755
         assert manifest["note.txt"]["mode"] == 0o644
+
+    def test_carry_forward_keeps_the_head_mode_over_the_disk_mode(
+        self, project, monkeypatch
+    ):
+        """The discriminating case: head has deploy.sh at 0o755 (seeded where
+        chmod exists). On Windows the CRT stats a .sh as non-executable, so a
+        plain re-stat would pack 0o644 while carry-forward keeps 0o755. The
+        disk says 0o644 here too (faked), and nothing may drift."""
+        import firnpack as fp
+
+        if os.name == "nt":
+            pytest.skip("needs a chmod-capable seed; the wine/Windows check covers it")
+        write(project, "deploy.sh", "#!/bin/sh\necho v1\n", mode=0o755)
+        repo = fp.Repo.init(project)
+        repo.commit("seed")
+        (project / "deploy.sh").chmod(0o644)  # what the Windows CRT reports
+        monkeypatch.setattr(fp, "_WINDOWS", True)
+        write(project, "deploy.sh", "#!/bin/sh\necho v2\n")
+        result = repo.commit("edited on windows")
+        _, manifest, _ = repo._read_layer(result["layer_id"])
+        clean_after = repo.status()["clean"]
+        repo.close()
+        assert manifest["deploy.sh"]["mode"] == 0o755  # carried, not re-statted
+        assert clean_after is True

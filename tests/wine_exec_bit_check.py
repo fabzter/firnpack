@@ -1,6 +1,7 @@
 """Manual Windows-behavior verification, run under wine/CrossOver.
 
-Not collected by pytest (name does not match test_*.py): it needs a
+Run by hand under wine/CrossOver, and by CI on Windows (see below). Not
+collected by pytest itself (name does not match test_*.py): it needs a
 Windows runtime. Purpose: prove the Windows facts the macOS/Linux
 suites cannot reach —
 
@@ -17,16 +18,23 @@ here. `.sh` is NOT in the CRT exec set, so a plain re-stat would pack
 0o644 while carry-forward packs 0o755 — the two behaviors disagree,
 and the script also prints the re-stat value as evidence.
 
-Usage (64-bit wine prefix, Windows python):
+Usage under wine (64-bit prefix, Windows python; note the doubled
+backslashes: an unquoted `C:\firnwork` loses its backslash in a POSIX
+shell and the work directory silently becomes the relative `C:firnwork`):
 
     wineloader "Z:\\tmp\\winpy\\python.exe" \
-        "Z:\\<repo>\\tests\\wine_exec_bit_check.py" C:\\firnwork \
-        Z:\\tmp\\wineseed
+        "Z:\\<repo>\\tests\\wine_exec_bit_check.py" "C:\\\\firnwork" \
+        "Z:\\\\tmp\\\\wineseed"
 
-The seed repository is created on POSIX (see the session recipe:
-init, write deploy.sh, chmod 0o755, commit). Exits 0 with PASS lines
-when every expectation holds; exits 1 on any mismatch. On a non-
-Windows runtime it prints a notice and exits 0.
+The seed repository is created on POSIX (init, write deploy.sh, chmod
+0o755, commit) and is optional: without it only the six checks that need no
+seed run. Exits 0 with PASS lines when every expectation holds; exits 1 on
+any mismatch. On a non-Windows runtime it prints a notice and exits 0.
+Verified 2026-10-22 under CrossOver wine with python 3.13.16 embed: 6/6
+without a seed, 9/9 with one.
+
+On the windows-latest CI legs, `tests/test_windows_exec_bit.py` runs this
+script (without a seed) as part of the normal suite.
 """
 
 import os
@@ -100,8 +108,10 @@ def main() -> int:
         ]
         srepo.close()
 
+    expected = dict(EXPECTED)
     failures = 0
-    for (name, want), (_, got) in zip(EXPECTED, observed, strict=True):
+    for name, got in observed:
+        want = expected[name]
         ok = got == want
         failures += 0 if ok else 1
         print(f"{'PASS' if ok else 'FAIL'} {name}: {got!r} (want {want!r})")
