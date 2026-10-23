@@ -35,6 +35,7 @@ These never mutate the repository or worktree, in any state:
 | drift guard | 1 | message names drift / "uncommitted" | commit, restore, or export the drift first; never discard on a user's behalf |
 | pending-merge guard | 1 | "merge is pending" | resolve markers + `commit`, or `merge --abort` |
 | merge conflict | 1 | JSON `status: "conflict"` with `conflicts: [paths]` | edit markers, then `commit` (records both parents); or `--abort` |
+| unresolved markers | 1 | message "conflict markers (<<<<<<< / >>>>>>>) are still in: …", or `merge conflict — resolve these files first` while a merge is pending; `--json`: `status: "blocked_by_markers"` | remove the markers and commit again; never pass `--allow-markers` on your own |
 | compact refusal | 1 | message names a branch (merge/delete it, or raise `--keep`), or "still referenced" with no branch (a merge edge: raise `--keep` only; deleting a branch cannot clear it), or the kept-merge second-parent condition | raise `--keep`; delete the named branch only when the message names one; re-plan |
 | permission refusal | 1 | "pass --yes", "--keep must be" | stop; obtain explicit human parameters |
 | integrity failure | 3 | `firnpack: integrity failure:` + problem list | stop writes; run `verify`; follow `storage.md` recovery |
@@ -85,6 +86,8 @@ after them (rescue-layer additions excepted, and reported).
 ```
 commit    {status: packed|nothing_to_pack, layer_id?, tree_id?, files?,
            size?, message?, maxpath_warning?, history_reminder?}
+          refused (exit 1) → {status: blocked_by_markers,
+          blocked_by_markers: [paths]}
 status    {head: {id, kind, branch?}|null, clean, modified[], added[],
            missing[], ignored_count, ignored[], nested_gitignore,
            merge_pending, flattened_pending}
@@ -127,8 +130,10 @@ parents/second parents; timestamps are UTC ISO-8601 with offset.
      supplies the second parent automatically.
    - Giving up: `merge --abort` (rescues partial resolutions; report
      `rescue_layer`).
-3. Never commit conflict markers: `commit` refuses them by default
-   (`--allow-markers` exists for the human who insists).
+3. Never commit conflict markers: `commit` refuses them by default, in or
+   out of a merge (exit 1; with `--json`, stdout is
+   `{"status": "blocked_by_markers", "blocked_by_markers": [paths]}`).
+   Remove the markers; `--allow-markers` exists for the human who insists.
 
 ## 7. Things firnpack will never do
 

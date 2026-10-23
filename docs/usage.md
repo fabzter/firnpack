@@ -49,9 +49,13 @@ firnpack commit [-m MSG] [--allow-markers] [--allow-flattened] [--json]
 
 Packs the tracked working tree into a new layer on the current head (branch
 or pin). With no `-m`, an honest auto-message is generated from the change
-set. Refuses (exit 1) when it would complete a pending merge while
-unresolved conflict markers remain, unless `--allow-markers`; consumes a
-pending merge by recording `merge_theirs` as the new layer's second parent.
+set. Refuses (exit 1, nothing written) when any tracked text file still has
+a line starting `<<<<<<<` or `>>>>>>>` — in or out of a merge — unless
+`--allow-markers` (one commit) or `[merge] block_unresolved_markers = false`
+(warn and commit). `=======` alone, indented or mid-line markers, binary
+files and symlinks are not flagged, and a commit that would write nothing
+still reports "nothing to pack". Consumes a pending merge by recording
+`merge_theirs` as the new layer's second parent.
 
 ```
 $ firnpack commit -m "chapters 1-3 draft"
@@ -78,6 +82,10 @@ JSON:
 `status: "nothing_to_pack"` (exit 0, no layer written) when the tree is
 identical to the head. The `history_reminder` object appears once per
 crossing of the configured threshold (default 50 layers).
+
+A refused commit (exit 1) prints, with `--json`, exactly one object on
+stdout — `{"status": "blocked_by_markers", "blocked_by_markers":
+["notes.txt"]}` (paths sorted) — and the human sentence on stderr.
 
 > **For agents**: a clean `status` is the precondition for `merge` and
 > `switch`; `commit` is the only command that consumes a pending merge.
@@ -299,9 +307,11 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes] [--json]
 
 Squashes everything below the newest N layers of the current head's
 first-parent chain into one foundation layer and reclaims disk. `--keep` is
-required (no default exists or may be added) and must be at least 1 — `0`
-or a negative number is refused (exit 1, nothing touched), in every mode;
-a non-number is a usage error (exit 2). `--yes` is required for real
+required (no default exists or may be added). Today `0` or a negative number
+is refused (exit 1, nothing touched), in every mode; a non-number is a usage
+error (exit 2). That refusal is the current behavior, not a ratified rule —
+whether `--keep 0` should ever mean something (for example "squash
+everything") is an open owner decision. `--yes` is required for real
 runs; `--dry-run` plans without mutating.
 
 Rewrites, reports and guards (all visible, never silent):

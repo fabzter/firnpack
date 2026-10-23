@@ -123,9 +123,15 @@ class DriftError(FirnpackError):
 
 
 class MergeConflict(FirnpackError):
-    def __init__(self, paths):
+    """Leftover conflict markers block a commit. `pending_merge` says whether
+    the commit was completing a conflicted merge (the original case) or an
+    ordinary commit (SPEC §9.2: the guard covers every commit)."""
+
+    def __init__(self, paths, *, pending_merge=True):
         self.paths = paths
-        super().__init__(f"merge conflict in: {', '.join(paths)}")
+        self.pending_merge = pending_merge
+        what = "merge conflict in" if pending_merge else "conflict markers in"
+        super().__init__(f"{what}: {', '.join(paths)}")
 
 
 class IntegrityError(FirnpackError):
@@ -1285,19 +1291,6 @@ class Repo:
         pending_flatten = json.loads(wt["flattened_pending"] or "null")
         merge_theirs = wt["merge_theirs"]
 
-        # Marker guard fires only when completing a pending merge (§9.2).
-        if merge_theirs:
-            marked = self._scan_markers(files)
-            if marked:
-                block = self._cfg.getboolean(
-                    "merge", "block_unresolved_markers", fallback=True
-                )
-                if block and not allow_markers:
-                    raise MergeConflict(marked)
-                print(
-                    f"warning: conflict markers remain in: {', '.join(marked)}",
-                    file=sys.stderr,
-                )
         if pending_flatten:
             block_flat = not allow_flattened and not self._cfg.getboolean(
                 "core", "allow_flattened", fallback=False
@@ -1316,6 +1309,23 @@ class Repo:
                 "layer_id": wt["head_id"],
                 "files": len(files) + len(symlinks),
             }
+
+        # Marker guard (SPEC §9.2/§11; owner decision 2026-10-22: every
+        # commit that would write a layer, not only the one completing a
+        # pending merge). A no-op commit never gets here, so a repository
+        # that already holds marker-shaped lines can still say "nothing to
+        # pack".
+        marked = self._scan_markers(entries)
+        if marked:
+            block = self._cfg.getboolean(
+                "merge", "block_unresolved_markers", fallback=True
+            )
+            if block and not allow_markers:
+                raise MergeConflict(marked, pending_merge=bool(merge_theirs))
+            print(
+                f"warning: conflict markers remain in: {', '.join(marked)}",
+                file=sys.stderr,
+            )
 
         # Path-length warnings (§13): warn past 240, refuse past ustar's 255.
         long_paths = [
@@ -2328,17 +2338,19 @@ class Repo:
         sign = "+" if delta >= 0 else "-"
         return f"pack {n} files ({sign}{_human(abs(delta))})"
 
-    def _scan_markers(self, files) -> list[str]:
+    def _scan_markers(self, entries) -> list[str]:
+        """Tracked text files holding a line that starts with <<<<<<< or
+        >>>>>>> (SPEC §11). Works on the bytes commit() already read for
+        hashing, so the guard costs no second pass over the disk."""
         marked = []
-        for path in files:
-            data = (self.root / path).read_bytes()
-            if b"\0" in data:
-                continue
+        for path, (_size, data, _target, _exec) in entries.items():
+            if data is None or b"\0" in data:
+                continue  # symlink or binary
             for line in data.decode("utf-8", errors="replace").splitlines():
                 if line.startswith("<<<<<<<") or line.startswith(">>>>>>>"):
                     marked.append(path)
                     break
-        return marked
+        return sorted(marked)
 
     def _maybe_remind(self, result: dict) -> None:
         threshold = self._cfg.getint("history", "reminder_threshold", fallback=50)
@@ -2831,6 +2843,13 @@ def _cmd_commit(args) -> int:
             allow_markers=args.allow_markers,
             allow_flattened=args.allow_flattened,
         )
+    except MergeConflict as exc:
+        if args.json:
+            # SPEC §9.2: the refusal is machine-readable too; the humane
+            # sentence still goes to stderr via main()
+            payload = {"status": "blocked_by_markers", "blocked_by_markers": exc.paths}
+            print(json.dumps(payload, indent=2))
+        raise
     finally:
         repo.close()
     if args.json:
@@ -3402,11 +3421,20 @@ def main(argv=None) -> int:
     try:
         return args.func(args)
     except MergeConflict as exc:
-        print(
-            f"firnpack: merge conflict — resolve these files first: "
-            f"{', '.join(exc.paths)}",
-            file=sys.stderr,
-        )
+        if exc.pending_merge:
+            print(
+                f"firnpack: merge conflict — resolve these files first: "
+                f"{', '.join(exc.paths)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"firnpack: conflict markers (<<<<<<< / >>>>>>>) are still in: "
+                f"{', '.join(exc.paths)}. Remove them and commit again, or "
+                f"commit anyway with --allow-markers (or set [merge] "
+                f"block_unresolved_markers = false in .firn/config).",
+                file=sys.stderr,
+            )
         return 1
     except DriftError as exc:
         print(f"firnpack: {exc}", file=sys.stderr)

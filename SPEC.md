@@ -691,9 +691,8 @@ only when none exists (Q2); it is an ordinary tracked file afterwards.
    (or `[core] allow_flattened = true`); `commit` echoes the pending list
    and records it in the layer's `flattened_paths` meta field (§5) —
    auditable in history, never silent.
-   > **Status in 1.0.0**: the marker guard in this step applies to the
-   > pending-merge case only, and signals refusal by message and exit 1, not
-   > by a `blocked_by_markers` JSON key (see §11 status note).
+   > **Decided 2026-10-22 (owner)**: this guard applies to every commit that
+   > would write a layer, whether or not a merge is pending; see §11.
 7. Identical-record edge: same tree, message, author, parents, and timestamp
    hash to the same `layer_id` — second write is a no-op (file exists, DB row
    insert-or-ignore); correct dedup. Different message/parents/time → distinct
@@ -944,11 +943,11 @@ cases; the algorithm is the boring, correct one:
   `commit --allow-markers`. Scan matches lines starting `<<<<<<<` or
   `>>>>>>>` only; `=======` alone is excluded (markdown/RST false
   positives).
-  > **Status in 1.0.0**: the guard runs only while completing a pending merge
-  > (the case above). A plain `commit` with marker-shaped lines in an ordinary
-  > worktree is not scanned, and the refusal is the stderr message plus exit 1
-  > — the `"blocked_by_markers"` JSON key is not emitted. Extending the guard
-  > to every commit, or emitting the key, is an open owner decision.
+  > **Decided 2026-10-22 (owner)**: the guard covers **every commit that
+  > would write a layer**, not only the one completing a pending merge. A
+  > commit that would write nothing still says "nothing to pack". On refusal
+  > `--json` prints `{"status": "blocked_by_markers", "blocked_by_markers":
+  > [paths]}` on stdout (sorted) and the humane sentence goes to stderr.
 
 ## 12. Status & change detection
 

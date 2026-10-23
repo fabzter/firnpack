@@ -46,7 +46,10 @@ for a non-developer. Pointer: SPEC §11, Q7.
 `commit` refuses leftover `<<<<<<<`/`>>>>>>>` markers; configurable via
 `[merge] block_unresolved_markers`, per-commit `--allow-markers`.
 Rationale: a half-resolved merge must never silently become a layer.
-Pointer: SPEC §10, v0.7→v0.8.
+Scope, decided 2026-10-22 (owner): every commit that would write a layer,
+not only the one completing a pending merge; a commit that writes nothing
+still says "nothing to pack". Refusal under `--json` carries
+`blocked_by_markers`. Pointer: SPEC §9.2, §11, v0.7→v0.8.
 
 ## D-08 — `compact` with a strict permission model (2026-10-18, ratified)
 

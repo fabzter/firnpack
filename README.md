@@ -140,6 +140,9 @@ Excluded files are never silently hidden: `status` counts them, and
   ends in one plain sentence that names the problem and the way back
   (`firnpack verify` confirms your history is intact), never a wall of
   technical text.
+- A half-resolved merge can't slip into your history by accident: `commit`
+  refuses files that still contain conflict markers (`<<<<<<<`), merge or no
+  merge, and tells you the one flag that overrides it.
 - Every layer carries its own checksum, and the layer's *name* is that
   checksum — tampering or disk rot is detectable by re-reading.
 - Extraction of a layer is guarded: a corrupt or hostile archive can never
