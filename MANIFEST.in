@@ -1,0 +1,9 @@
+# sdist contents (SPEC §18, docs/README.md: "All documents ship in the sdist").
+# The wheel stays exactly one module; this file only affects the source dist.
+# The sdist is also self-testing: the guard tests read the CI/release
+# workflows and tests/wine_exec_bit_check.py, so they ship too.
+include SPEC.md CHANGELOG.md AGENTS.md
+recursive-include docs *.md
+recursive-include research *.md
+recursive-include tests *.py
+graft .github

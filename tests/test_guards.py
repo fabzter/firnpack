@@ -43,6 +43,21 @@ class TestPackagingGuards:
         text = (ROOT / "LICENSE").read_text(encoding="utf-8")
         assert text.startswith("MIT License")
 
+    def test_sdist_manifest_ships_the_documents(self):
+        """SPEC §18 / docs/README.md promise that all documents ship in the
+        sdist. setuptools only includes README and tests by default, so the
+        promise lives in MANIFEST.in (the published 1.0.0 sdist shipped no
+        docs). The wheel stays one module: MANIFEST.in does not touch it."""
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        for needle in (
+            "SPEC.md",
+            "CHANGELOG.md",
+            "recursive-include docs",
+            "recursive-include research",
+            "graft .github",
+        ):
+            assert needle in manifest, f"MANIFEST.in misses {needle!r}"
+
 
 class TestWorkflowGuards:
     def _ci(self) -> str:
