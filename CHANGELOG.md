@@ -2,6 +2,59 @@
 
 Hand-maintained (SPEC §24). Semver; releases on `v*` tags.
 
+## 1.0.2 — 2026-10-25
+
+### Fixed
+
+- Clean tracked file↔directory transitions now work through `restore` and
+  `switch`. Worktree writes preflight every target and ancestor before
+  deleting anything; ignored paths and symlink obstructions are refused
+  with a path-specific diagnostic instead of silently overwritten.
+- Deletion decisions use the previous layer's manifest and current
+  visibility, not a possibly missing or stale stat cache. Restore can
+  replace a new visible obstruction only after saving it in a rescue
+  layer; unrelated new files and ignored content remain untouched.
+- Failed head-moving writes attempt to restore both selection and files,
+  including cleaning up newly created directories. Errors distinguish
+  successful rollback from partial recovery. An exclusive-create collision
+  preserves the occupying entry rather than deleting it during rollback.
+  A failed merge abort keeps the merge pending and reports its saved
+  rescue layer for recovery.
+- Worktree materialization uses binary-mode exclusive writes on Windows,
+  preserving LF, CRLF and arbitrary binary bytes without CRT translation.
+- Supported names that cannot fit a USTAR name/prefix split use a
+  deterministic PAX `path` record. Short, Unicode and splittable names
+  retain their existing USTAR bytes. Unsupported symbolic-link targets
+  and non-UTF-8 filesystem names receive humane refusals, not tracebacks.
+- Both layer writers finish TAR/gzip trailers before syncing the file,
+  and clean up their temporary file after a caught write failure.
+- `compact --archive` exclusively creates its output and selects a
+  collision suffix instead of truncating an earlier archive, file or
+  symlink target. Failed archive writes clean up only their owned output;
+  the completed ZIP is closed and synced before history is rewritten.
+  If a later rewrite fails, the error also names the completed archive.
+- Archive destinations inside `.firn`, including symlink and filesystem
+  aliases, are refused before any mutation, even for a preview or no-op.
+  Space checks include archive bytes and the archive destination.
+- `amend` enforces commit's existing 255-character stored-path limit and
+  emits the same optional `maxpath_warning` for long full paths.
+- `rename-branch` refuses a missing source and applies branch creation's
+  existing name constraints before changing any branch.
+- Slashed ignore rules keep working on Python 3.14, whose public
+  `fnmatch.translate` output uses a different end-of-string anchor.
+
+### Verification
+
+- Added 48 chained CLI journeys for daily editing, branches and pins,
+  merge resolution/abort, copy/rebuild/corruption recovery, explicit
+  history compaction, nested-directory commands, and POSIX symlinks and
+  executable modes, with independent file, archive and metadata checks.
+- Added worktree and storage regressions for ignored obstructions,
+  rollback failures, deterministic archive collisions, encoding and
+  path boundaries, and injected I/O failures. See
+  [the verification report](docs/real-world-verification.md) for target
+  identities, initial failures, corrected oracles and test limits.
+
 ## 1.0.1 — 2026-10-23
 
 ### Changed behavior

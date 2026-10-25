@@ -121,7 +121,7 @@ class TestMergeDbFirstOrdering:
 
         original = Repo._materialize
 
-        def crash(self, tree):
+        def crash(self, tree, **_kw):
             raise RuntimeError("simulated crash mid-materialize")
 
         monkeypatch.setattr(Repo, "_materialize", crash)

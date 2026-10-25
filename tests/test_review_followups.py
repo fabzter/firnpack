@@ -143,12 +143,14 @@ def test_failed_restore_reports_actual_rollback_result(
 ):
     (project / "a.txt").write_bytes(b"base\n")
     (project / "0-target-only.txt").write_bytes(b"written before the link\n")
-    (project / "z-ignored.txt").write_bytes(b"target version\n")
     (project / "link").symlink_to("a.txt")
     repo = firnpack.Repo.init(project)
     target = repo.commit("with link")["layer_id"]
     (project / "0-target-only.txt").unlink()
-    (project / "z-ignored.txt").unlink()
+    # z-ignored.txt is created only AFTER the commits below: an ignored
+    # file must never sit at a target path (protected -> preflight
+    # refusal would bypass the injected mid-write failure this test
+    # exists to exercise).
     (project / ".gitignore").write_bytes(b"~$*\nz-ignored.txt\n")
     if not rollback_fails:
         (project / "link").unlink()
@@ -268,7 +270,7 @@ def test_failed_database_undo_does_not_claim_the_head_was_put_back(
         def close(self):
             connection.close()
 
-    def fail_sync(layer_id, *, created_paths=None):
+    def fail_sync(layer_id, **_kw):
         calls.append(layer_id)
         (project / "a.txt").write_bytes(b"partly new\n")
         raise original
@@ -312,11 +314,11 @@ def test_non_firnpack_sync_error_keeps_its_type_and_reports_rollback(
     original_args = original.args
     calls = []
 
-    def fail_once(layer_id, *, created_paths=None):
+    def fail_once(layer_id, **kw):
         calls.append(layer_id)
         if len(calls) == 1:
             raise original
-        sync(layer_id)
+        sync(layer_id, **kw)
 
     monkeypatch.setattr(repo, "_sync_worktree_to", fail_once)
     try:

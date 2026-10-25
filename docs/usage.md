@@ -119,8 +119,9 @@ firnpack status [--full] [--ignored] [--json]
 Drift vs the head layer. Fast path uses the stat cache (size+mtime+mode);
 `--full` re-hashes everything. While a merge is pending, `status` always
 re-hashes (the files the merge wrote are measured against the head layer, so
-a marker-filled file is reported as `modified`, never as clean). Ignored files
-are counted always and listed with `--ignored`.
+a marker-filled file is reported as `modified`, never as clean). Ignored
+files are counted always; the human output lists them with `--ignored`,
+while `--json` always carries the sorted `ignored` list.
 
 JSON:
 
@@ -204,9 +205,10 @@ firnpack rename-branch OLD NEW
 firnpack delete-branch NAME
 ```
 
-`branch` stays on the current branch. `switch` refuses on drift or pending
-merge (exit 1); switching to a layer-id prefix (at least 6 hex characters)
-pins the worktree (commits while pinned advance the pin). `delete-branch`
+`branch` stays on the current branch and refuses while a merge is
+pending. `switch` refuses on drift or pending merge (exit 1); switching
+to a layer-id prefix (at least 6 hex characters) pins the worktree
+(commits while pinned advance the pin). `delete-branch`
 refuses for the branch you are on, and warns on stderr when the deleted
 branch's tip is no longer reachable from any branch or from where you are.
 
@@ -282,6 +284,11 @@ or `{"status": "nothing_to_amend", "layer_id": "<40 hex>"}`. With leftover
 conflict markers, `amend` refuses exactly like `commit` (exit 1, nothing
 written; `--json` prints `{"status": "blocked_by_markers",
 "blocked_by_markers": [paths]}`).
+
+Amend applies the same stored-path limit and long-path warning as commit:
+paths longer than 255 characters are refused; full paths longer than 240
+characters add an optional `maxpath_warning: [paths]` to the amended
+result and print a warning on stderr.
 
 ## restore
 

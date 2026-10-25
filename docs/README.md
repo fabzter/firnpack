@@ -6,6 +6,7 @@
 | [`agent-contract.md`](agent-contract.md) | normative contract for automated operators: schemas, error taxonomy, safe behaviors |
 | [`storage.md`](storage.md) | layer format, database schema, recovery playbook |
 | [`decisions.md`](decisions.md) | decision log (one entry per settled decision) |
+| [`real-world-verification.md`](real-world-verification.md) | chained user journeys, defect findings, artifact identities and honest verification limits |
 | [`../README.md`](../README.md) | humane front door |
 | [`../SPEC.md`](../SPEC.md) | full specification (living decision record) |
 | [`../AGENTS.md`](../AGENTS.md) | repository context for contributors |

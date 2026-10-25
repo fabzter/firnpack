@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import contextlib
+import copy
 import difflib
 import fnmatch
 import getpass
@@ -25,6 +26,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import tarfile
 import time
@@ -33,7 +35,7 @@ import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 FIRN_DIR = ".firn"
 META_MEMBER = "__firnpack_meta__"
@@ -43,7 +45,7 @@ _MARKER_LINE = re.compile(rb"(?:\A|[\r\n])(?:<<<<<<<|>>>>>>>)")
 FORMAT_VERSION = 1
 GZIP_LEVEL = 6
 MAX_PATH_WARN = 240
-MAX_PATH_HARD = 255  # ustar prefix-splitting ceiling
+MAX_PATH_HARD = 255  # stored relative-path character limit
 ID_LEN = 40  # hex chars
 RESERVED_NAMES = {
     "CON",
@@ -200,6 +202,37 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
             time.sleep(0.2 * (2**attempt))
 
 
+def _write_file(fp: Path, data: bytes) -> None:
+    """Create a leaf with exclusive create: a path that raced in after
+    preflight is never overwritten silently — EEXIST propagates to the
+    caller's rollback."""
+    fd = os.open(
+        fp,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        0o666,
+    )
+    owned_identity = None
+    try:
+        st = os.fstat(fd)
+        owned_identity = (st.st_dev, st.st_ino)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written == 0:
+                raise OSError(f"could not finish writing {fp}")
+            view = view[written:]
+        os.close(fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        if owned_identity is not None:
+            with contextlib.suppress(OSError):
+                st = os.lstat(fp)
+                if (st.st_dev, st.st_ino) == owned_identity:
+                    fp.unlink()
+        raise
+
+
 def _symlink(fp: Path, target: str) -> None:
     """Create a symbolic link, or say plainly why not.
 
@@ -210,6 +243,8 @@ def _symlink(fp: Path, target: str) -> None:
     SPEC §5; this only makes the failure honest.)"""
     try:
         fp.symlink_to(target)
+    except (FileExistsError, IsADirectoryError, NotADirectoryError):
+        raise
     except (OSError, NotImplementedError) as exc:
         reason = getattr(exc, "strerror", None) or str(exc)
         raise FirnpackError(
@@ -270,7 +305,7 @@ def _canonical_json(obj) -> bytes:
 def _seg_regex(seg: str) -> str:
     """fnmatch translation for one path segment ('*' must not cross '/')."""
     t = fnmatch.translate(seg)
-    if t.startswith("(?s:") and t.endswith("\\Z"):
+    if t.startswith("(?s:") and t.endswith(("\\Z", "\\z")):
         return t[4:-3]
     return t
 
@@ -372,14 +407,27 @@ def _validate_member_names(names: list[str]) -> None:
                 raise IntegrityError(f"reserved device name: {name!r}")
 
 
+def _stored_utf8(text: str, description: str = "path") -> bytes:
+    """Refuse undecodable filesystem names before hashing or writing."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise FirnpackError(
+            f"cannot store {description} {text!r}: it is not valid UTF-8. "
+            "Rename the path or replace the symbolic link target and try again."
+        ) from None
+
+
 def _check_storable(files, symlinks) -> None:
     """Refuse, at COMMIT, any name the read side would refuse later.
 
     Shares _validate_member_names so commit and read cannot disagree. Used
-    by both layer writers (_write_layer for commit, _rewrite_layer_from for
-    amend). A name rejected here used to pack fine and then wedge
+    by both layer writers, including history rewritten by compact. A name
+    rejected here used to pack fine and then wedge
     status/verify/export/restore on the committed-but-unreadable layer.
     """
+    for path in (*files, *symlinks):
+        _stored_utf8(path)
     try:
         if META_MEMBER in (*files, *symlinks):
             raise IntegrityError(f"reserved member name: {META_MEMBER!r}")
@@ -388,6 +436,35 @@ def _check_storable(files, symlinks) -> None:
         raise FirnpackError(
             f"cannot store {exc.args[0]}; rename the file and try again"
         ) from None
+
+
+class _CanonicalTarInfo(tarfile.TarInfo):
+    """Keep existing USTAR bytes, using PAX only for an unsplittable name."""
+
+    def tobuf(
+        self,
+        format=tarfile.DEFAULT_FORMAT,
+        encoding=tarfile.ENCODING,
+        errors="surrogateescape",
+    ):
+        _stored_utf8(self.name)
+        if self.issym():
+            _stored_utf8(self.linkname, f"symbolic link target for {self.name!r}")
+        if format != tarfile.USTAR_FORMAT:
+            return super().tobuf(format, encoding, errors)
+        try:
+            return super().tobuf(format, encoding, errors)
+        except ValueError as exc:
+            probe = copy.copy(self)
+            probe.name = "member"
+            try:
+                tarfile.TarInfo.tobuf(probe, format, encoding, errors)
+            except ValueError:
+                raise FirnpackError(
+                    f"cannot store {self.name!r}: {exc}. Adjust the file or "
+                    "shorten the symbolic link target and try again."
+                ) from None
+            return super().tobuf(tarfile.PAX_FORMAT, encoding, errors)
 
 
 def _validate_member_types(members) -> None:
@@ -449,13 +526,17 @@ def _hash_tree(
     change tree_id — never silently invisible drift.
     """
     digest = hashlib.sha256()
-    for path in sorted(entries, key=lambda p: p.encode("utf-8")):
+    for path in sorted(entries, key=_stored_utf8):
         _, content, target, exec_bit = entries[path]
-        data = target.encode("utf-8") if content is None else content
+        data = (
+            _stored_utf8(target, f"symbolic link target for {path!r}")
+            if content is None
+            else content
+        )
         kind = b"f" if content is not None else b"l"
         prefix = kind + (b"\x01" if exec_bit else b"\x00")
         digest.update(
-            hashlib.sha256(prefix + path.encode("utf-8") + b"\x00" + data).digest()
+            hashlib.sha256(prefix + _stored_utf8(path) + b"\x00" + data).digest()
         )
     return digest.hexdigest()[:ID_LEN]
 
@@ -880,6 +961,7 @@ class Repo:
                 _, carry, _ = self._read_layer(wt["head_id"])
         entries, stats = {}, {}
         for path in files:
+            _stored_utf8(path)
             fp = self.root / path
             st = fp.stat()
             data = fp.read_bytes()
@@ -888,14 +970,226 @@ class Repo:
             entries[path] = (len(data), data, None, mode == 0o755)
             stats[path] = [st.st_size, st.st_mtime_ns, mode]
         for path in symlinks:
+            _stored_utf8(path)
             fp = self.root / path
             target = os.readlink(fp)
-            entries[path] = (len(target.encode("utf-8")), None, target, False)
+            target_bytes = _stored_utf8(target, f"symbolic link target for {path!r}")
+            entries[path] = (len(target_bytes), None, target, False)
             st = fp.lstat()
             stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
         return entries, stats
 
-    # -- layer I/O
+    # -- worktree preparation (SPEC §9.4/§9.7/§10)
+    #
+    # Two phases, always in this order:
+    #   1. _prepare_tree_write — READ-ONLY. Every target path and every
+    #      ancestor is inspected before a single byte changes. Anything
+    #      that is not a currently _walk-visible leaf is protected
+    #      unconditionally: ignored files, dangling symlinks, FIFOs and
+    #      other special files, now-ignored formerly-tracked paths, and
+    #      every entry an ignored directory hides (ignored enumeration is
+    #      not exhaustive). Blocking directories are inspected recursively
+    #      WITHOUT following symlinks. Refusal names the blocking path.
+    #   2. _apply_tree — the only place anything is deleted or created:
+    #      unlink eligible leaves, rmdir EMPTY obstructing directories
+    #      (never rmtree), mkdir needed parents, exclusive-create leaves.
+    #
+    # Deletion baseline is the previous-state MANIFEST (old head layer for
+    # switch/restore/FF, ours ∪ theirs for a pending merge), intersected
+    # with current visible leaves — never stat_cache, which may be NULL
+    # after a rebuild and may still name files that are ignored now.
+    # `rescued_ok` (a durable rescue layer already written this
+    # invocation) additionally permits removing new visible files, but
+    # only where they obstruct a target leaf or needed ancestor.
+
+    def _check_tree_shape(self, target_paths) -> None:
+        """Refuse a tree that contains both a leaf and paths beneath it —
+        impossible on a real filesystem. _read_layer enforces this for
+        persisted layers; in-memory merged trees need the same gate."""
+        seen = set(target_paths)
+        for path in seen:
+            parts = path.split("/")
+            for i in range(1, len(parts)):
+                ancestor = "/".join(parts[:i])
+                if ancestor in seen:
+                    raise FirnpackError(
+                        f"cannot materialize: {path!r} lies beneath "
+                        f"{ancestor!r}, which is a file"
+                    )
+
+    def _prepare_tree_write(
+        self,
+        target_paths,
+        baseline: set[str],
+        *,
+        rescued_ok: bool,
+    ) -> tuple[set[str], set[str]]:
+        """Inspect every target leaf and ancestor BEFORE mutation.
+
+        Returns (unlink, rmdirs): leaves to unlink and directories to
+        remove empty (deepest-first). Raises FirnpackError naming the
+        blocking path when a protected entry would have to be destroyed.
+        """
+        self._check_tree_shape(target_paths)
+        files, symlinks, _ignored, _nested = self._walk()
+        visible = set(files) | set(symlinks)
+
+        def leaf_removable(rel: str) -> bool:
+            return rel in visible and (rel in baseline or rescued_ok)
+
+        blockers: list[str] = []
+        # every previous tracked leaf is deleted wholesale (the old
+        # stat-cache wipe's semantics, but driven by the MANIFEST):
+        # leaves absent from the target disappear, leaves shared with the
+        # target are rewritten. Only visible leaves may be unlinked.
+        unlink: set[str] = set(baseline) & visible
+        rmdirs: set[str] = set()
+
+        def scan_dir(directory: Path, rel: str) -> bool:
+            """True when `directory` holds only removable leaves/dirs.
+            Never follows symlinks."""
+            removable = True
+            try:
+                items = sorted(os.scandir(directory), key=lambda e: e.name)
+            except OSError:
+                blockers.append(rel or str(directory))
+                return False
+            for item in items:
+                item_rel = f"{rel}/{item.name}" if rel else item.name
+                item_path = Path(item.path)
+                if item.is_symlink():
+                    if leaf_removable(item_rel):
+                        unlink.add(item_rel)
+                    else:
+                        blockers.append(item_rel)
+                        removable = False
+                elif item.is_dir(follow_symlinks=False):
+                    if scan_dir(item_path, item_rel):
+                        rmdirs.add(item_rel)
+                    else:
+                        blockers.append(item_rel)
+                        removable = False
+                elif item.is_file(follow_symlinks=False):
+                    if leaf_removable(item_rel):
+                        unlink.add(item_rel)
+                    else:
+                        blockers.append(item_rel)
+                        removable = False
+                else:
+                    blockers.append(item_rel)
+                    removable = False
+            return removable
+
+        for path in sorted(set(target_paths)):
+            comps = path.split("/")
+            if not path or not all(comps) or comps[0] in (FIRN_DIR, ".git"):
+                raise FirnpackError(
+                    f"cannot write to repository metadata path: {path!r}"
+                )
+            fp = self.root / path
+            # every ancestor must be a real directory, absent, or a
+            # removable leaf — a symlinked ancestor is never followed.
+            prefix = ""
+            broken = False
+            for comp in comps[:-1]:
+                prefix = f"{prefix}/{comp}" if prefix else comp
+                ap = self.root / prefix
+                if not os.path.lexists(ap):
+                    continue
+                try:
+                    st = os.lstat(ap)
+                except OSError:
+                    blockers.append(prefix)
+                    broken = True
+                    break
+                if stat.S_ISDIR(st.st_mode):
+                    continue
+                if leaf_removable(prefix):
+                    unlink.add(prefix)
+                    continue
+                blockers.append(prefix)
+                broken = True
+                break
+            if broken:
+                continue
+            # the leaf slot itself
+            if not os.path.lexists(fp):
+                continue
+            try:
+                st = os.lstat(fp)
+            except OSError:
+                blockers.append(path)
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                if scan_dir(fp, path):
+                    rmdirs.add(path)
+                else:
+                    blockers.append(path)
+            elif leaf_removable(path):
+                unlink.add(path)
+            else:
+                blockers.append(path)
+        if blockers:
+            raise FirnpackError(
+                "cannot materialize: untracked or ignored items occupy "
+                f"{', '.join(sorted(set(blockers)))} — move them aside "
+                "(or commit what should be kept) and try again. Nothing "
+                "was changed."
+            )
+        return unlink, rmdirs
+
+    def _apply_prepared(
+        self,
+        prepared: tuple[set[str], set[str]],
+    ) -> None:
+        """Phase 2a: unlink the eligible leaves, then remove EMPTY
+        obstructing directories deepest-first (never rmtree — a raced-in
+        child makes rmdir fail, which propagates to the caller's rollback
+        path instead of deleting user data)."""
+        unlink, rmdirs = prepared
+        for rel in sorted(unlink):
+            fp = self.root / rel
+            if fp.is_symlink() or fp.is_file():
+                fp.unlink()
+            else:
+                fp.unlink()  # special leaf approved by preflight
+        for rel in sorted(rmdirs, key=lambda p: p.count("/"), reverse=True):
+            with contextlib.suppress(FileNotFoundError):
+                (self.root / rel).rmdir()
+
+    def _ensure_parents(self, fp: Path, created_dirs: set[str] | None):
+        """mkdir -p the leaf's ancestors; record only directories that did
+        not exist before, for rollback."""
+        parent = fp.parent
+        missing = []
+        while parent != self.root and not os.path.lexists(parent):
+            missing.append(parent)
+            parent = parent.parent
+        for d in reversed(missing):
+            d.mkdir()
+            if created_dirs is not None:
+                created_dirs.add(str(d.relative_to(self.root)))
+
+    def _write_tree_leaves(
+        self, tree: dict, created_dirs: set[str] | None = None
+    ) -> set[str]:
+        """Write leaf entries of `tree` ({path: (bytes|None, target|None,
+        exec)}); record created ancestors in `other_dirs` and return the
+        set of created leaf paths."""
+        created: set[str] = set()
+        for path in sorted(tree):
+            data, target, exec_bit = tree[path]
+            fp = self.root / path
+            self._ensure_parents(fp, created_dirs)
+            if target is not None:
+                _symlink(fp, target)
+                created.add(path)
+            else:
+                _write_file(fp, data)
+                created.add(path)
+                if exec_bit and os.name != "nt":
+                    fp.chmod(0o755)
+        return created
 
     def _layer_path(self, layer_id: str) -> Path:
         return self.layers_dir / f"{layer_id}.firn"
@@ -918,45 +1212,52 @@ class Repo:
             wt = self._worktree()
             if wt["head_id"]:
                 _, carry, _ = self._read_layer(wt["head_id"])
-        with (
-            open(tmp, "wb") as raw,
-            gzip.GzipFile(
-                fileobj=raw, mode="wb", compresslevel=GZIP_LEVEL, mtime=0
-            ) as gz,
-            tarfile.open(fileobj=gz, mode="w|", format=tarfile.USTAR_FORMAT) as tar,
-        ):
-            ti = tarfile.TarInfo(META_MEMBER)
-            ti.size = len(meta_bytes)
-            ti.mtime = 0
-            ti.mode = 0o644
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = ""
-            tar.addfile(ti, io.BytesIO(meta_bytes))
-            for path in sorted(files, key=lambda p: p.encode("utf-8")):
-                fp = self.root / path
-                data = fp.read_bytes()
-                ti = tarfile.TarInfo(path)
-                ti.size = len(data)
-                ti.mtime = 0
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = ""
-                head_mode = _carry_mode(carry, path)
-                ti.mode = _file_mode(fp, head_mode)
-                tar.addfile(ti, io.BytesIO(data))
-            for path in sorted(symlinks, key=lambda p: p.encode("utf-8")):
-                target = os.readlink(self.root / path)
-                ti = tarfile.TarInfo(path)
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = target
-                ti.mtime = 0
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = ""
-                ti.mode = 0o777
-                tar.addfile(ti)
-            raw.flush()
-            os.fsync(raw.fileno())
-        _replace_with_retry(tmp, self._layer_path(layer_id))
-        _fsync_dir(self.layers_dir)
+        try:
+            with open(tmp, "wb") as raw:
+                with (
+                    gzip.GzipFile(
+                        fileobj=raw, mode="wb", compresslevel=GZIP_LEVEL, mtime=0
+                    ) as gz,
+                    tarfile.open(
+                        fileobj=gz, mode="w|", format=tarfile.USTAR_FORMAT
+                    ) as tar,
+                ):
+                    ti = _CanonicalTarInfo(META_MEMBER)
+                    ti.size = len(meta_bytes)
+                    ti.mtime = 0
+                    ti.mode = 0o644
+                    ti.uid = ti.gid = 0
+                    ti.uname = ti.gname = ""
+                    tar.addfile(ti, io.BytesIO(meta_bytes))
+                    for path in sorted(files, key=_stored_utf8):
+                        fp = self.root / path
+                        data = fp.read_bytes()
+                        ti = _CanonicalTarInfo(path)
+                        ti.size = len(data)
+                        ti.mtime = 0
+                        ti.uid = ti.gid = 0
+                        ti.uname = ti.gname = ""
+                        head_mode = _carry_mode(carry, path)
+                        ti.mode = _file_mode(fp, head_mode)
+                        tar.addfile(ti, io.BytesIO(data))
+                    for path in sorted(symlinks, key=_stored_utf8):
+                        target = os.readlink(self.root / path)
+                        ti = _CanonicalTarInfo(path)
+                        ti.type = tarfile.SYMTYPE
+                        ti.linkname = target
+                        ti.mtime = 0
+                        ti.uid = ti.gid = 0
+                        ti.uname = ti.gname = ""
+                        ti.mode = 0o777
+                        tar.addfile(ti)
+                raw.flush()
+                os.fsync(raw.fileno())
+            _replace_with_retry(tmp, self._layer_path(layer_id))
+            _fsync_dir(self.layers_dir)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         return self._layer_path(layer_id).stat().st_size
 
     def _read_layer(self, layer_id: str):
@@ -1198,6 +1499,14 @@ class Repo:
         theirs_tree = tree_of(theirs_id)
         merged, conflicts = self._merge_trees(base_tree, ours_tree, theirs_tree)
 
+        # Preflight BEFORE merge_theirs is set: two valid trees can merge
+        # into an impossible file+descendant result, and protected
+        # worktree entries must refuse before any pointer moves. The
+        # deletion baseline is the ours manifest (drift guard already ran).
+        prepared = self._prepare_tree_write(
+            set(merged), set(ours_tree), rescued_ok=False
+        )
+
         if not conflicts:
             # DB-first (the v0.4 ratified ordering, identical to the
             # conflict path): set pending state BEFORE materializing, so
@@ -1210,7 +1519,7 @@ class Repo:
                     "UPDATE worktree SET merge_theirs = ? WHERE id = 1",
                     (theirs_id,),
                 )
-            self._materialize(merged)
+            self._materialize(merged, baseline=set(ours_tree), prepared=prepared)
             msg = message or f"merge {ref}"
             result = self.commit(msg)
             return {
@@ -1226,7 +1535,8 @@ class Repo:
                 "UPDATE worktree SET merge_theirs = ? WHERE id = 1",
                 (theirs_id,),
             )
-        self._materialize(merged)  # markers included
+        # markers included
+        self._materialize(merged, baseline=set(ours_tree), prepared=prepared)
         result = {
             "status": "conflict",
             "head": ours_id,
@@ -1252,6 +1562,14 @@ class Repo:
         if wt["merge_theirs"] is None:
             raise FirnpackError("no merge is pending")
         ours_id = wt["head_id"]
+        theirs_id = wt["merge_theirs"]
+
+        # Deletion baseline for putting ours back: everything the pending
+        # merge may have written — ours paths UNION theirs paths — never
+        # the (possibly stale) stat cache. stat_cache is a hint only.
+        ours_manifest = set(self._read_layer(ours_id)[1])
+        theirs_manifest = set(self._read_layer(theirs_id)[1])
+        abort_baseline = ours_manifest | theirs_manifest
 
         # Rescue layer: tree = current worktree, parent = head, no
         # second parent, distinctive auto message. Written directly, NOT
@@ -1295,7 +1613,51 @@ class Repo:
                 )
             rescue_written = True
 
-        self._sync_worktree_to(ours_id)
+        # Preflight with the rescue already durable (or none needed):
+        # visible new leaves may be removed only where they obstruct.
+        prepared = self._prepare_tree_write(
+            ours_manifest,
+            abort_baseline,
+            rescued_ok=rescue_written,
+        )
+        created_paths: set[str] = set()
+        created_dirs: set[str] = set()
+        try:
+            self._sync_worktree_to(
+                ours_id,
+                prepared=prepared,
+                created_paths=created_paths,
+                created_dirs=created_dirs,
+            )
+        except BaseException as exc:
+            # best-effort: drop only what this attempt created, then say
+            # plainly what state was left — pending merge stays, the
+            # rescue (if any) is named, files may be partly restored.
+            for path in sorted(created_paths):
+                fp = self.root / path
+                with contextlib.suppress(OSError):
+                    if fp.is_symlink() or fp.is_file():
+                        fp.unlink()
+            for path in sorted(created_dirs, key=lambda p: p.count("/"), reverse=True):
+                with contextlib.suppress(OSError):
+                    (self.root / path).rmdir()
+            note = (
+                "merge --abort did not finish restoring the previous "
+                "worktree: files may be partly restored, and the merge "
+                "is still pending — fix the problem and run "
+                "'firnpack merge --abort' again."
+            )
+            if rescue_written:
+                note += (
+                    f" Your uncommitted work was saved as layer "
+                    f"{rescue_id}; retrieve it with: firnpack export "
+                    f"{rescue_id} --to DIR"
+                )
+            if isinstance(exc, FirnpackError):
+                exc.args = (f"{exc} {note}",)
+            else:
+                print(f"warning: {note}", file=sys.stderr)
+            raise
         with self._db:
             self._db.execute("UPDATE worktree SET merge_theirs = NULL WHERE id = 1")
         return {
@@ -1304,36 +1666,63 @@ class Repo:
             "rescue_layer": rescue_id if rescue_written else None,
         }
 
-    def _materialize(self, tree: dict) -> None:
+    def _materialize(
+        self,
+        tree: dict,
+        *,
+        baseline: set[str],
+        prepared: tuple[set[str], set[str]] | None = None,
+    ) -> None:
         """Write a merged tree into the worktree (markers included),
-        then refresh the stat cache so status reports drift correctly."""
-        cache = json.loads(self._worktree()["stat_cache"] or "{}")
-        for path in cache:
-            fp = self.root / path
-            if fp.is_symlink() or fp.is_file():
-                fp.unlink()
+        then refresh the stat cache so status reports drift correctly.
+
+        Same two-phase contract as _sync_worktree_to: merge() prepares
+        before merge_theirs is set, so a refused materialization leaves
+        the worktree and pending state untouched."""
+        if prepared is None:
+            prepared = self._prepare_tree_write(set(tree), baseline, rescued_ok=False)
+        self._apply_prepared(prepared)
+        self._write_tree_leaves(tree)
         stats = {}
         for path in sorted(tree):
             data, target, exec_bit = tree[path]
             fp = self.root / path
-            fp.parent.mkdir(parents=True, exist_ok=True)
             if target is not None:
-                if fp.exists() or fp.is_symlink():
-                    fp.unlink()
-                _symlink(fp, target)
                 st = fp.lstat()
                 stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
             else:
-                fp.write_bytes(data)
                 mode = 0o755 if exec_bit else 0o644
-                if exec_bit and os.name != "nt":
-                    fp.chmod(0o755)
                 st = fp.stat()
                 stats[path] = [st.st_size, st.st_mtime_ns, mode]
         with self._db:
             self._db.execute(
                 "UPDATE worktree SET stat_cache = ?, updated_at = ? WHERE id = 1",
                 (json.dumps(stats), _utcnow()),
+            )
+
+    def _path_length_warnings(self, files, symlinks) -> list[str]:
+        paths = (*files, *symlinks)
+        for path in paths:
+            if len(path) > MAX_PATH_HARD:
+                raise FirnpackError(
+                    f"path too long to store ({len(path)} chars): {path}. "
+                    "Shorten the file name or enable Windows long paths."
+                )
+        return [
+            path
+            for path in paths
+            if len(str((self.root / path).resolve())) > MAX_PATH_WARN
+        ]
+
+    @staticmethod
+    def _add_path_warning(result: dict, long_paths: list[str]) -> None:
+        if long_paths:
+            result["maxpath_warning"] = long_paths
+            print(
+                f"warning: {len(long_paths)} path(s) longer than "
+                f"{MAX_PATH_WARN} characters; restore may need Windows long "
+                "paths enabled.",
+                file=sys.stderr,
             )
 
     # -- commands
@@ -1394,18 +1783,7 @@ class Repo:
                     file=sys.stderr,
                 )
 
-        # Path-length warnings (§13): warn past 240, refuse past ustar's 255.
-        long_paths = [
-            p
-            for p in (*files, *symlinks)
-            if len(str((self.root / p).resolve())) > MAX_PATH_WARN
-        ]
-        for p in (*files, *symlinks):
-            if len(p) > MAX_PATH_HARD:
-                raise FirnpackError(
-                    f"path too long to store ({len(p)} chars): {p}. "
-                    f"Shorten the file name or enable Windows long paths."
-                )
+        long_paths = self._path_length_warnings(files, symlinks)
 
         parent = wt["head_id"]
         now = _utcnow()
@@ -1474,14 +1852,7 @@ class Repo:
             "size": size,
             "message": message,
         }
-        if long_paths:
-            result["maxpath_warning"] = long_paths
-            print(
-                f"warning: {len(long_paths)} path(s) longer than "
-                f"{MAX_PATH_WARN} characters; restore may need Windows long "
-                f"paths enabled.",
-                file=sys.stderr,
-            )
+        self._add_path_warning(result, long_paths)
         self._maybe_remind(result)
         return result
 
@@ -1517,6 +1888,7 @@ class Repo:
 
         # amend writes a layer, so it gets the same marker guard as commit
         self._check_markers(entries, allow=allow_markers, pending_merge=False)
+        long_paths = self._path_length_warnings(files, symlinks)
 
         msg = message if message is not None else old_msg
         record = {
@@ -1558,71 +1930,141 @@ class Repo:
                 (layer_id, tree_id, json.dumps(stats), _utcnow()),
             )
         self._sweep_orphans()
-        return {
+        result = {
             "status": "amended",
             "layer_id": layer_id,
             "replaced": wt["head_id"],
         }
+        self._add_path_warning(result, long_paths)
+        return result
 
-    def _move_head_and_sync(self, wt: dict, layer_id: str, kind: str) -> None:
+    def _move_head_and_sync(
+        self,
+        wt: dict,
+        layer_id: str,
+        kind: str,
+        *,
+        prepared: tuple[set[str], set[str]] | None = None,
+        rescued_ok: bool = False,
+        head_change: tuple[str | None, str | None] | None = None,
+    ) -> None:
         """Move the head (branch head or pin), then sync the worktree.
         DB-first ordering records the target across a crash. A caught
         write failure attempts to restore the previous head and files;
-        the error reports whether that rollback succeeded or was partial."""
+        the error reports whether that rollback succeeded or was partial.
+
+        `head_change` = (new_head_kind, new_head_branch) lets switch move
+        the branch selection atomically with the head (default: keep the
+        current kind, pin iff kind == 'pin'). `wt` must be the pre-move
+        worktree row: its fields are exactly what rollback restores."""
         old_head = wt["head_id"]
+        target_manifest = self._read_layer(layer_id)[1]
+        if prepared is None:
+            baseline = set(self._read_layer(old_head)[1]) if old_head else set()
+            prepared = self._prepare_tree_write(
+                set(target_manifest), baseline, rescued_ok=rescued_ok
+            )
         with self._db:
-            if kind == "branch":
+            if head_change is None and kind == "branch":
                 self._db.execute(
                     "UPDATE branches SET head = ? WHERE name = ?",
                     (layer_id, wt["head_branch"]),
                 )
+            new_kind, new_branch = (
+                head_change
+                if head_change is not None
+                else (kind, wt["head_branch"] if kind == "branch" else None)
+            )
             self._db.execute(
-                "UPDATE worktree SET head_id = ?, head_pin = ?, "
-                "updated_at = ? WHERE id = 1",
-                (layer_id, layer_id if kind == "pin" else None, _utcnow()),
+                "UPDATE worktree SET head_kind = ?, head_branch = ?, "
+                "head_pin = ?, head_id = ?, updated_at = ? WHERE id = 1",
+                (
+                    new_kind,
+                    new_branch,
+                    layer_id if new_kind == "pin" else None,
+                    layer_id,
+                    _utcnow(),
+                ),
             )
         created_paths: set[str] = set()
+        created_dirs: set[str] = set()
         try:
-            self._sync_worktree_to(layer_id, created_paths=created_paths)
+            self._sync_worktree_to(
+                layer_id,
+                prepared=prepared,
+                created_paths=created_paths,
+                created_dirs=created_dirs,
+            )
         except BaseException as exc:
+            collision = isinstance(
+                exc, (FileExistsError, IsADirectoryError, NotADirectoryError)
+            )
             note = (
                 "The previous head could not be restored; head and files may "
                 "be partly updated. Run 'firnpack status' and 'firnpack verify'."
             )
             try:
                 with self._db:
-                    if kind == "branch":
+                    if head_change is None and kind == "branch":
                         self._db.execute(
                             "UPDATE branches SET head = ? WHERE name = ?",
                             (old_head, wt["head_branch"]),
                         )
                     self._db.execute(
-                        "UPDATE worktree SET head_id = ?, head_pin = ?, "
-                        "updated_at = ? WHERE id = 1",
-                        (old_head, old_head if kind == "pin" else None, _utcnow()),
+                        "UPDATE worktree SET head_kind = ?, head_branch = ?, "
+                        "head_pin = ?, head_id = ?, updated_at = ? WHERE id = 1",
+                        (
+                            wt["head_kind"],
+                            wt["head_branch"],
+                            wt["head_pin"],
+                            old_head,
+                            _utcnow(),
+                        ),
                     )
             except Exception:
                 pass  # preserve the original failure, not a rollback error
             else:
                 try:
-                    # The old stat cache cannot name files newly created by
-                    # the failed rewrite. Remove only those actually attempted,
-                    # not untouched target paths that may hold ignored work.
+                    # Remove only what the failed attempt actually
+                    # created — never untouched paths that may hold
+                    # ignored work. Directories it made are removed empty,
+                    # deepest first.
                     for path in sorted(created_paths):
                         fp = self.root / path
                         if fp.is_symlink() or fp.is_file():
                             fp.unlink()
-                    self._sync_worktree_to(old_head)
+                    for path in sorted(
+                        created_dirs, key=lambda p: p.count("/"), reverse=True
+                    ):
+                        with contextlib.suppress(OSError):
+                            (self.root / path).rmdir()
+                    # A collision belongs to another writer. Even the
+                    # failed target's manifest must not authorize its
+                    # deletion during rollback.
+                    if not collision:
+                        self._sync_worktree_to(
+                            old_head,
+                            baseline=set(target_manifest),
+                            rescued_ok=False,
+                        )
                 except Exception:
                     note = (
                         "The head was put back, but files may be partly "
                         "written. Run 'firnpack status' before continuing."
                     )
                 else:
-                    note = (
-                        "The head was put back and files were restored to "
-                        "the previous head."
-                    )
+                    if collision:
+                        note = (
+                            "The head was put back, but files may be partly "
+                            "written. An entry that occupied a target path "
+                            "was left untouched. Run 'firnpack status' before "
+                            "continuing."
+                        )
+                    else:
+                        note = (
+                            "The head was put back and files were restored to "
+                            "the previous head."
+                        )
             if isinstance(exc, FirnpackError):
                 exc.args = (f"{exc} {note}",)
             else:
@@ -1642,6 +2084,16 @@ class Repo:
                 "a merge is pending — resolve it, or merge --abort, before restoring"
             )
         st = self.status()
+        # Preflight BEFORE the rescue write: a restore that cannot change
+        # the worktree must refuse without leaving an unneeded rescue
+        # layer behind. The baseline is the CURRENT head manifest; the
+        # prospective rescue permits removing only obstructing new
+        # visible files once it is durably written.
+        baseline = set(self._read_layer(wt["head_id"])[1])
+        target_manifest = set(self._read_layer(layer_id)[1])
+        prepared = self._prepare_tree_write(
+            target_manifest, baseline, rescued_ok=not st["clean"]
+        )
         rescue_id = None
         if not st["clean"]:
             files, symlinks, _i, _n = self._walk()
@@ -1683,7 +2135,13 @@ class Repo:
         # already written above remains recoverable even if the sync fails.
         kind = wt["head_kind"]
         try:
-            self._move_head_and_sync(wt, layer_id, kind)
+            self._move_head_and_sync(
+                wt,
+                layer_id,
+                kind,
+                prepared=prepared,
+                rescued_ok=rescue_id is not None,
+            )
         except BaseException:
             if rescue_id is not None:
                 print(
@@ -1941,6 +2399,83 @@ class Repo:
             ),
         }
 
+    def _archive_location(self, directory: str) -> tuple[Path, Path]:
+        """Validate placement without creating even an empty directory."""
+        try:
+            arc = Path(directory).resolve()
+            admin = self.firn.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise FirnpackError(
+                f"cannot resolve archive directory {directory!r}: {exc}"
+            ) from None
+        if arc == admin or admin in arc.parents:
+            raise FirnpackError("the archive directory must be outside .firn")
+        for ancestor in (arc, *arc.parents):
+            with contextlib.suppress(OSError):
+                if ancestor.samefile(self.firn):
+                    raise FirnpackError("the archive directory must be outside .firn")
+        ancestor = arc
+        while not ancestor.exists():
+            ancestor = ancestor.parent
+        if not ancestor.is_dir():
+            raise FirnpackError(
+                f"archive directory has a non-directory ancestor: {ancestor}"
+            )
+        return arc, ancestor
+
+    def _write_compact_archive(self, arc: Path, layer_ids: set[str]) -> Path:
+        """Own one exclusive output; finish and sync it before any rewrite."""
+        missing = []
+        parent = arc
+        while not parent.exists():
+            missing.append(parent)
+            parent = parent.parent
+        arc.mkdir(parents=True, exist_ok=True)
+        stem = f"firnpack-archive-{_utcnow().replace(':', '')}"
+        for suffix in range(1000):
+            name = stem + (f"-{suffix}" if suffix else "") + ".zip"
+            candidate = arc / name
+            try:
+                # Explicit close preserves the first failure during cleanup.
+                raw = open(candidate, "xb")  # noqa: SIM115
+            except OSError:
+                if os.path.lexists(candidate):
+                    continue
+                raise
+            break
+        else:
+            raise FirnpackError(
+                "too many existing archive names; choose another archive directory"
+            )
+        zf = None
+        owned_identity = None
+        try:
+            st = os.fstat(raw.fileno())
+            owned_identity = (st.st_dev, st.st_ino)
+            zf = zipfile.ZipFile(raw, "w", zipfile.ZIP_STORED)
+            for lid in sorted(layer_ids):
+                zf.write(self._layer_path(lid), f"{lid}.firn")
+            zf.close()
+            zf = None
+            raw.flush()
+            os.fsync(raw.fileno())
+            raw.close()
+            _fsync_dir(arc)
+            for directory in missing:
+                _fsync_dir(directory.parent)
+        except BaseException:
+            if zf is not None:
+                with contextlib.suppress(BaseException):
+                    zf.close()
+            with contextlib.suppress(BaseException):
+                raw.close()
+            with contextlib.suppress(OSError):
+                st = candidate.lstat()
+                if owned_identity is None or (st.st_dev, st.st_ino) == owned_identity:
+                    candidate.unlink()
+            raise
+        return candidate
+
     def compact(
         self,
         keep: int,
@@ -1956,6 +2491,7 @@ class Repo:
         not strand them — they have no database row, and an orphan
         file fails `verify` while nothing else would ever sweep it."""
         self._compact_wrote = False
+        self._compact_archive_path = None
         try:
             return self._compact(
                 keep, archive_dir=archive_dir, dry_run=dry_run, yes=yes
@@ -1964,6 +2500,12 @@ class Repo:
             if self._compact_wrote:
                 with contextlib.suppress(Exception):
                     self._sweep_orphans()
+            if self._compact_archive_path is not None:
+                print(
+                    f"warning: archive saved to {self._compact_archive_path} "
+                    "before the later failure.",
+                    file=sys.stderr,
+                )
             raise
 
     def _compact(
@@ -1995,10 +2537,13 @@ class Repo:
         safe: pre-swap -> old history intact; post-swap -> new
         authoritative, old swept).
 
-        Peak-disk check runs up front: new layers are written before
-        old files are deleted; refuse when free space is below the
-        peak (a mid-write ENOSPC is never the failure mode).
+        Peak-disk checks include the archive and run before directory or
+        history writes. Concurrent space depletion can still cause ENOSPC;
+        archive failures leave the old history intact.
         """
+        arc = arc_ancestor = None
+        if archive_dir:
+            arc, arc_ancestor = self._archive_location(archive_dir)
         wt = self._worktree()
         if wt["merge_theirs"] is not None:
             raise FirnpackError(
@@ -2142,6 +2687,15 @@ class Repo:
         new_writes = 1 + len(rewrite_set)  # foundation + every rewrite
         avg = old_total / max(len(all_rows), 1)
         peak = old_total + int(avg * new_writes)
+        archive_need = 0
+        if arc is not None:
+            archive_need = (
+                sum(self._layer_path(lid).stat().st_size for lid in collapsed | gc)
+                + 1024 * len(collapsed | gc)
+                + 4096
+            )
+            if arc_ancestor.stat().st_dev == self.root.stat().st_dev:
+                peak += archive_need
 
         if dry_run:
             return {
@@ -2177,16 +2731,17 @@ class Repo:
                 f"space, or copy the glacier to a roomier drive and "
                 f"compact there — it is self-contained."
             )
+        if arc is not None and shutil.disk_usage(arc_ancestor).free < archive_need:
+            raise FirnpackError(
+                f"not enough free disk space for the archive (~{archive_need} bytes); "
+                "choose a roomier archive destination and try again"
+            )
 
         # archive first (SPEC 9.9: export before deletion)
         archive_path = None
-        if archive_dir:
-            arc = Path(archive_dir)
-            arc.mkdir(parents=True, exist_ok=True)
-            archive_path = arc / f"firnpack-archive-{_utcnow().replace(':', '')}.zip"
-            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as zf:
-                for lid in sorted(collapsed | gc):
-                    zf.write(self._layer_path(lid), f"{lid}.firn")
+        if arc is not None:
+            archive_path = self._write_compact_archive(arc, collapsed | gc)
+            self._compact_archive_path = archive_path
 
         # build the foundation layer: tree of the cut, new root
         foundation_record = {
@@ -2419,43 +2974,50 @@ class Repo:
         contents = self._layer_contents(old_id, regular)
         tmp = self.layers_dir / f"{new_id}.firn.tmp"
         meta_bytes = _canonical_json(meta)
-        with (
-            open(tmp, "wb") as raw,
-            gzip.GzipFile(
-                fileobj=raw, mode="wb", compresslevel=GZIP_LEVEL, mtime=0
-            ) as gz,
-            tarfile.open(fileobj=gz, mode="w|", format=tarfile.USTAR_FORMAT) as tar,
-        ):
-            ti = tarfile.TarInfo(META_MEMBER)
-            ti.size = len(meta_bytes)
-            ti.mtime = 0
-            ti.mode = 0o644
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = ""
-            tar.addfile(ti, io.BytesIO(meta_bytes))
-            for path in sorted(files, key=lambda p: p.encode("utf-8")):
-                v = manifest[path]
-                data = contents[path]
-                ti = tarfile.TarInfo(path)
-                ti.size = len(data)
-                ti.mtime = 0
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = ""
-                ti.mode = v.get("mode", 0o644)
-                tar.addfile(ti, io.BytesIO(data))
-            for path in sorted(links, key=lambda p: p.encode("utf-8")):
-                ti = tarfile.TarInfo(path)
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = manifest[path]["target"]
-                ti.mtime = 0
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = ""
-                ti.mode = 0o777
-                tar.addfile(ti)
-            raw.flush()
-            os.fsync(raw.fileno())
-        _replace_with_retry(tmp, self._layer_path(new_id))
-        _fsync_dir(self.layers_dir)
+        try:
+            with open(tmp, "wb") as raw:
+                with (
+                    gzip.GzipFile(
+                        fileobj=raw, mode="wb", compresslevel=GZIP_LEVEL, mtime=0
+                    ) as gz,
+                    tarfile.open(
+                        fileobj=gz, mode="w|", format=tarfile.USTAR_FORMAT
+                    ) as tar,
+                ):
+                    ti = _CanonicalTarInfo(META_MEMBER)
+                    ti.size = len(meta_bytes)
+                    ti.mtime = 0
+                    ti.mode = 0o644
+                    ti.uid = ti.gid = 0
+                    ti.uname = ti.gname = ""
+                    tar.addfile(ti, io.BytesIO(meta_bytes))
+                    for path in sorted(files, key=_stored_utf8):
+                        v = manifest[path]
+                        data = contents[path]
+                        ti = _CanonicalTarInfo(path)
+                        ti.size = len(data)
+                        ti.mtime = 0
+                        ti.uid = ti.gid = 0
+                        ti.uname = ti.gname = ""
+                        ti.mode = v.get("mode", 0o644)
+                        tar.addfile(ti, io.BytesIO(data))
+                    for path in sorted(links, key=_stored_utf8):
+                        ti = _CanonicalTarInfo(path)
+                        ti.type = tarfile.SYMTYPE
+                        ti.linkname = manifest[path]["target"]
+                        ti.mtime = 0
+                        ti.uid = ti.gid = 0
+                        ti.uname = ti.gname = ""
+                        ti.mode = 0o777
+                        tar.addfile(ti)
+                raw.flush()
+                os.fsync(raw.fileno())
+            _replace_with_retry(tmp, self._layer_path(new_id))
+            _fsync_dir(self.layers_dir)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         return self._layer_path(new_id).stat().st_size
 
     def _auto_message(self, parent, entries) -> str:
@@ -2798,60 +3360,78 @@ class Repo:
         row = self._db.execute(
             "SELECT head FROM branches WHERE name = ?", (ref,)
         ).fetchone()
-        with self._db:
-            if row:
-                layer_id = row[0]
-                self._db.execute(
-                    "UPDATE worktree SET head_kind = 'branch', "
-                    "head_branch = ?, head_pin = NULL, head_id = ?, "
-                    "updated_at = ? WHERE id = 1",
-                    (ref, layer_id, _utcnow()),
-                )
-                kind = "branch"
-            else:
-                layer_id = self._resolve_id(ref)
-                self._db.execute(
-                    "UPDATE worktree SET head_kind = 'pin', head_pin = ?, "
-                    "head_branch = NULL, head_id = ?, updated_at = ? "
-                    "WHERE id = 1",
-                    (layer_id, layer_id, _utcnow()),
-                )
-                kind = "pin"
-            self._sync_worktree_to(layer_id)
-        return {"ref": ref, "kind": kind, "head": layer_id}
+        if row:
+            layer_id = row[0]
+            head_change = ("branch", ref)
+        else:
+            layer_id = self._resolve_id(ref)
+            head_change = ("pin", None)
+        # Preflight BEFORE the pointer changes: a protected blocker or an
+        # impossible transition refuses with the worktree untouched.
+        baseline = set(self._read_layer(wt["head_id"])[1]) if wt["head_id"] else set()
+        prepared = self._prepare_tree_write(
+            set(self._read_layer(layer_id)[1]), baseline, rescued_ok=False
+        )
+        self._move_head_and_sync(
+            wt,
+            layer_id,
+            wt["head_kind"],
+            prepared=prepared,
+            head_change=head_change,
+        )
+        return {"ref": ref, "kind": head_change[0], "head": layer_id}
 
     def _sync_worktree_to(
-        self, layer_id: str, *, created_paths: set[str] | None = None
+        self,
+        layer_id: str,
+        *,
+        baseline: set[str] | None = None,
+        prepared: tuple[set[str], set[str]] | None = None,
+        rescued_ok: bool = False,
+        created_paths: set[str] | None = None,
+        created_dirs: set[str] | None = None,
     ) -> None:
         """Extract the layer's tree into the worktree and refresh the
-        snapshot/stat cache. M1 scope: files+symlinks replaced wholesale.
+        snapshot/stat cache. Two ordered phases:
 
-        All layer content is read in ONE pass BEFORE any worktree
-        mutation (validation included): a corrupt member aborts the
-        switch with the worktree untouched — never half-deleted.
-        """
+        1. The layer is read and validated in ONE pass, then
+           _prepare_tree_write inspects every target leaf and ancestor
+           (deletion baseline = the previous-state manifest, never
+           stat_cache). A damaged layer or a protected worktree entry
+           aborts here, before anything is deleted.
+        2. Only then are eligible leaves unlinked, EMPTY obstructing
+           directories removed with rmdir, and leaves written with
+           exclusive create — nothing pre-existing is ever truncated.
+
+        `created_paths`/`created_dirs` (when given) collect what this
+        call actually created, so a caller's rollback removes only its
+        own work."""
         meta, manifest, _ = self._read_layer(layer_id)
         _warn_patch_level_once()
         regular_paths = {p for p, v in manifest.items() if v["target"] is None}
         contents = self._layer_contents(layer_id, regular_paths)
 
-        cache = json.loads(self._worktree()["stat_cache"] or "{}")
-        for path in cache:
-            fp = self.root / path
-            if fp.is_symlink() or fp.is_file():
-                fp.unlink()
+        if prepared is None:
+            if baseline is None:
+                raise FirnpackError(
+                    "internal error: _sync_worktree_to requires an explicit "
+                    "deletion baseline (the previous-state manifest)"
+                )
+            prepared = self._prepare_tree_write(
+                set(manifest), baseline, rescued_ok=rescued_ok
+            )
+        self._apply_prepared(prepared)
+
         entries = {}
         stats = {}
         for path in sorted(manifest):
             v = manifest[path]
             fp = self.root / path
-            if created_paths is not None and not os.path.lexists(fp):
-                created_paths.add(path)
-            fp.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_parents(fp, created_dirs)
             if v["target"] is not None:
-                if fp.exists() or fp.is_symlink():
-                    fp.unlink()
                 _symlink(fp, v["target"])
+                if created_paths is not None:
+                    created_paths.add(path)
                 st = fp.lstat()
                 stats[path] = [st.st_size, st.st_mtime_ns, 0o777]
                 entries[path] = (
@@ -2862,7 +3442,9 @@ class Repo:
                 )
             else:
                 data = contents[path]
-                fp.write_bytes(data)
+                _write_file(fp, data)
+                if created_paths is not None:
+                    created_paths.add(path)
                 mode = v.get("mode", 0o644)
                 if mode == 0o755 and os.name != "nt":
                     fp.chmod(0o755)
@@ -3435,11 +4017,17 @@ def _cmd_list_branches(args) -> int:
 def _cmd_rename_branch(args) -> int:
     repo = Repo.discover()
     try:
+        source = repo._db.execute(
+            "SELECT 1 FROM branches WHERE name = ?", (args.old,)
+        ).fetchone()
+        if source is None:
+            raise FirnpackError(f"no branch named {args.old!r}")
+        if not args.new or "/" in args.new or args.new.startswith("."):
+            raise FirnpackError(f"invalid branch name {args.new!r}")
         row = repo._db.execute(
             "SELECT 1 FROM branches WHERE name = ?", (args.new,)
         ).fetchone()
         if row:
-            repo.close()
             print(f"firnpack: branch {args.new!r} already exists", file=sys.stderr)
             return 1
         with repo._db:

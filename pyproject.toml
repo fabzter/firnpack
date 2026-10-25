@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "firnpack"
-version = "1.0.1"
+version = "1.0.2"
 description = "a glacier for your files — every commit a single packed layer of history."
 readme = "README.md"
 license = "MIT"

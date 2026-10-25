@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "campaign_date": "2026-10-25",
+  "release_version": "1.0.2",
+  "status": "prepublication_no_skip_checks_passed_fresh_pypi_checks_pending",
+  "engine_sha256": "90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268",
+  "baseline_engine_sha256": "e459b3f0fd7dc08c920d5565cad5bc0a3bcb1fa5cc124d6af0d49e5a7ba43d2e",
+  "counting": "Full-suite totals include the CLI journeys and API regressions; do not add overlapping totals. Initial baselines collected 44 journeys; final no-skip runs collected 48. Each final journey run also made seven separate target-Python fixture/oracle calls, not included in its CLI count.",
+  "evidence": "Digests identify the original local JSON traces and JUnit XML. This summary preserves their measured results; raw local traces are not included in the repository.",
+  "source_snapshot_note": "journey_sources_sha256 identifies the completed full-matrix snapshots. A later two-line directory-listing assertion was verified by the directory_enumeration_refinement runs on all three targets; the engine did not change.",
+  "journey_sources_sha256": {
+    "tests/test_real_world_daily.py": "8415b03dca48adfe1a8b6d7383ada93895e67ed28bbdfec1f470676358f75ab0",
+    "tests/test_real_world_merges.py": "40e9ce7c5183e827118a256bf0c98428eb398f6c028b4018c2a3a4913f00ec80",
+    "tests/test_real_world_recovery.py": "0233361f065373e2c10be7f147c01f07f9faee968ee12338f2da1d78424dab6b",
+    "tests/test_real_world_compact.py": "0262fe649a9945f94b995463ae2e8ee09f9771ca911c8406a2062e5a8fec81b3",
+    "tests/test_real_world_platform_journeys.py": "8715f53233153af53f8020c0cb43276c510aa2e1f95117837d104d3eebc64986",
+    "tests/real_world_support.py": "4d9167a2b3278ef18b4b26e0172fa6c9c06b1cfdd32758bd772cdf49d39bf10d"
+  },
+  "baseline_journeys": [
+    {
+      "target": "checkout313",
+      "python": "3.13.16",
+      "platform": "darwin",
+      "passed": 40,
+      "failed": 4,
+      "skipped": 0,
+      "cli_calls": 610,
+      "evidence_file": "baseline-checkout313.json",
+      "evidence_sha256": "1a478d6aec534dae03f01a7358f8bf975a2b587028813a1c14990de83596dafc"
+    },
+    {
+      "target": "published313",
+      "python": "3.13.16",
+      "platform": "darwin",
+      "passed": 40,
+      "failed": 4,
+      "skipped": 0,
+      "cli_calls": 610,
+      "evidence_file": "baseline-published313.json",
+      "evidence_sha256": "65299f2ddab064fc780e3d834b16e857a20d2b3afcfb3081c9d21265dee6c39f"
+    },
+    {
+      "target": "published314",
+      "python": "3.14.7",
+      "platform": "darwin",
+      "passed": 40,
+      "failed": 4,
+      "skipped": 0,
+      "cli_calls": 610,
+      "evidence_file": "baseline-published314.json",
+      "evidence_sha256": "185ccf319677184e926998447bd12ee199e38d182d73c562b5c9e1f9e76db56f"
+    },
+    {
+      "target": "wine313",
+      "python": "3.13.16",
+      "platform": "win32",
+      "passed": 35,
+      "failed": 9,
+      "skipped": 0,
+      "cli_calls": 582,
+      "failure_classification": {
+        "product": 3,
+        "host_path_oracle": 6
+      },
+      "evidence_file": "baseline-wine313.json",
+      "evidence_sha256": "1c9c1a634bcfdc9bc8e3b240ea8e6cd7caa1259afd40b45f1ed579551dfce6c0"
+    },
+    {
+      "target": "corrected_oracles_published313",
+      "python": "3.13.16",
+      "platform": "darwin",
+      "passed": 19,
+      "failed": 2,
+      "skipped": 0,
+      "cli_calls": 308,
+      "evidence_file": "corrected-oracles-red-published313.json",
+      "evidence_sha256": "a12d6f0707493baebfddd69732319b0ec4314373cb66923fcf5e7d6a93c7e79b"
+    },
+    {
+      "target": "corrected_oracles_wine_installed313",
+      "python": "3.13.16",
+      "platform": "win32",
+      "passed": 39,
+      "failed": 5,
+      "skipped": 0,
+      "cli_calls": 603,
+      "evidence_file": "corrected-oracles-red-wine-installed313.json",
+      "evidence_sha256": "6a7ed13547b05c044c641c69d745b288ddf89c8186faa12155b31bea55be07fe"
+    }
+  ],
+  "final_engine_journeys": [
+    {
+      "target": "checkout313",
+      "python": "3.13.16",
+      "platform": "darwin",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "evidence_file": "no-skip-checkout313.json",
+      "evidence_sha256": "fca18ad9656380c432af5e82b179ba880692aee522d99332cf152de319c16e32"
+    },
+    {
+      "target": "checkout314",
+      "python": "3.14.7",
+      "platform": "darwin",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "evidence_file": "no-skip-checkout314.json",
+      "evidence_sha256": "3f2115b4ec54fc9fc3f44eacced42e053cc92e0c6765890cdc3b3a940e9a253b"
+    },
+    {
+      "target": "wine313",
+      "python": "3.13.16",
+      "platform": "win32",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "evidence_file": "no-skip-wine313.json",
+      "evidence_sha256": "dfd1f86deeec5947ab98a0d8f75e2a025ab6c80d6241b2b5d9e074192095b4d2"
+    }
+  ],
+  "full_suites": [
+    {
+      "target": "checkout313",
+      "passed": 663,
+      "failed": 0,
+      "skipped": 3,
+      "evidence_file": "full-suite-no-skip313.xml",
+      "evidence_sha256": "9efefa1b07f8191afee33421ab9bb845cd9f10951eda97974b08e27dd18b498b"
+    },
+    {
+      "target": "checkout314",
+      "passed": 663,
+      "failed": 0,
+      "skipped": 3,
+      "evidence_file": "full-suite-no-skip314.xml",
+      "evidence_sha256": "d03fbb46d3f31c681018d5ca5bc3d01edc6e2646ccf635ce03f02999b595ed7b"
+    },
+    {
+      "target": "companion_copy313",
+      "passed": 663,
+      "failed": 0,
+      "skipped": 3,
+      "identity": "Companion module preloaded; legacy subprocess bindings and journey command explicitly redirected to that copy",
+      "evidence_file": "companion-full-no-skip313.xml",
+      "evidence_sha256": "d79c533564520e4e314cf83198146e908470f5821f7d828c7ebb1a65e3d3b666"
+    }
+  ],
+  "directory_enumeration_refinement": {
+    "description": "All four platform journeys rerun after additionally asserting os.listdir through the restored/exported directory symlink. Counts overlap the full matrix; do not add them.",
+    "journey_source_sha256": "70d7f362a319ff256c7d469a6402e9d0e5aaf79dd9fad18ee970ebf5798c9a30",
+    "helper_sha256": "4d9167a2b3278ef18b4b26e0172fa6c9c06b1cfdd32758bd772cdf49d39bf10d",
+    "results": [
+      {
+        "target": "checkout313",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "cli_calls": 51,
+        "evidence_file": "enumeration-checkout313.json",
+        "evidence_sha256": "251dfcfd6a424c565936397800a9bee957f73c0bd0ec919cb012ca43921b8c54"
+      },
+      {
+        "target": "checkout314",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "cli_calls": 51,
+        "evidence_file": "enumeration-checkout314.json",
+        "evidence_sha256": "7aaa326911c94595bf27ea35d71a9f6643537893733b44dba9e3c5ee030a7e93"
+      },
+      {
+        "target": "wine313",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "cli_calls": 51,
+        "evidence_file": "enumeration-wine313.json",
+        "evidence_sha256": "ce5660800db7c751dcfb4d8e72bfdeb7647966e0cba57fcf74601945a6ab8a5b"
+      }
+    ]
+  },
+  "local_wheel_api_regressions": [
+    {
+      "target": "installed_wheel313",
+      "passed": 79,
+      "failed": 0,
+      "skipped": 1,
+      "evidence_file": "verified-wheel-api313.xml",
+      "evidence_sha256": "0210facb813e363707d9c9d265b0a65e0cd53ed880a5db5d0952ab44b431462e"
+    },
+    {
+      "target": "installed_wheel314",
+      "passed": 79,
+      "failed": 0,
+      "skipped": 1,
+      "evidence_file": "verified-wheel-api314.xml",
+      "evidence_sha256": "7892b9e2c09c6019df998e55a397b262d529be790f320cae41ce202c2b21caba"
+    }
+  ],
+  "artifact_checks": {
+    "wheel_exactly_one_module": true,
+    "wheel_engine_equals_source": true,
+    "sdist_engine_equals_source": true,
+    "fresh_local_wheel_cli_aliases": [
+      "firn",
+      "firnpack"
+    ],
+    "installed_module_and_distribution_version_match": true,
+    "ruff_check": "passed",
+    "ruff_format_check": "passed",
+    "git_diff_check": "passed"
+  },
+  "publication": {
+    "status": "pending"
+  },
+  "fresh_pypi_installs": [],
+  "limits": [
+    "Synthetic projects only; no operations on real user repositories",
+    "Wine executes real Windows CPython but is not native NTFS or OneDrive",
+    "No physical HDD performance, power-loss or live cloud-sync guarantee",
+    "Fault injection checks specified failures, not every filesystem interleaving",
+    "Single-writer operation only",
+    "Native local full-suite skips: two Windows executable-bit cases and one non-UTF-8 filename APFS cannot create"
+  ]
+}

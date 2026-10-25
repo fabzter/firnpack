@@ -58,6 +58,12 @@ pending state is durable; resolve and commit, or abort. A failed
 restore/fast-forward attempts rollback and reports its outcome; never
 assume atomicity after an I/O error.
 
+Pending-merge fence detail: while `merge_theirs` is set, the commands that
+would move state — `switch`, `restore` (without `--to`), `amend`, `merge`,
+`compact`, and creating a `branch` — refuse with exit 1 and the "a merge is
+pending" message. `commit` completes the merge; inspection commands,
+`export`, and `restore --to` keep working.
+
 ## 4. Safe behaviors (MUST)
 
 1. **Never auto-overwrite.** Check `status.clean` before `merge`, `switch`,
@@ -114,7 +120,8 @@ merge     {status: merged|fast_forwarded|already_up_to_date|conflict, …}
           {status: blocked_by_markers, blocked_by_markers: [paths]}
           (merged files and pending state remain)
           --abort → {status: aborted, head, rescue_layer}
-amend     {status: amended|nothing_to_amend, layer_id, replaced?}
+amend     {status: amended|nothing_to_amend, layer_id, replaced?,
+           maxpath_warning?}
           refused (exit 1) → {status: blocked_by_markers,
           blocked_by_markers: [paths]}
 restore   {status: restored|exported, layer_id, rescue_layer?, previous_head?,
