@@ -22,6 +22,11 @@ Hand-maintained (SPEC §24). Semver; releases on `v*` tags.
   rescue layer for recovery.
 - Worktree materialization uses binary-mode exclusive writes on Windows,
   preserving LF, CRLF and arbitrary binary bytes without CRT translation.
+- Forward directory symlinks receive an explicit directory type on
+  Windows, inferred from the complete snapshot before materialization.
+  Export, worktree restore/switch and merge share the correction, including
+  link chains and directory aliases; stored targets and layer format stay
+  unchanged.
 - Supported names that cannot fit a USTAR name/prefix split use a
   deterministic PAX `path` record. Short, Unicode and splittable names
   retain their existing USTAR bytes. Unsupported symbolic-link targets

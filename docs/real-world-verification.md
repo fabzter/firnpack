@@ -190,11 +190,12 @@ journey distinguishes carry-forward from re-stat on Windows. The four
 platform journeys passed natively and under Windows/Wine (51 CLI
 calls on Windows) without a product-code change.
 
-## 5. Final-engine results
+## 5. Pre-native-Windows-CI results
 
-Recorded against the final source (1.0.2, engine sha256
-`90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268`).
-The journey rows use all five modules; full-suite totals include them
+These are retained results for the earlier 1.0.2 candidate, engine sha256
+`90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268`,
+not proof for the corrected engine below. The journey rows use all five
+modules; full-suite totals include them
 and must not be added to the journey counts.
 
 | Target | Evidence | Passed | Failed | Skipped | CLI calls |
@@ -224,10 +225,50 @@ source hash above.
 
 Fresh PyPI installations remain pending. Earlier `final-*` evidence
 used the intermediate engine described in §4. `verified-*` identifies
-the final engine before the no-skip harness review; the current
-`no-skip-*` journey evidence supersedes those rows and includes the
-symlink and imported-POSIX-mode journeys on every target. Wine is not
-a native NTFS/OneDrive environment.
+the earlier candidate before the no-skip harness review; the
+`no-skip-*` journey evidence includes the symlink and imported-POSIX-mode
+journeys on every local target. These green results did not predict the
+native Windows failure below: Wine is not native Windows.
+
+### Native Windows CI found an additional defect
+
+[CI run 40246365170](https://github.com/fabzter/firnpack/actions/runs/40246365170)
+tested commit `9bd2bf8`. All five POSIX jobs and the wheel guard passed.
+All three native Windows jobs failed the **unskipped** symlink journey:
+an exported forward directory link was created before its target
+directory existed, so Windows gave it an immutable file-link type.
+Reading through it as a directory failed with WinError 5. This is a real
+product defect, not a reason to skip or weaken the journey. The official
+[`os.symlink` contract](https://docs.python.org/3/library/os.html#os.symlink)
+explains why an explicit `target_is_directory` is required for a missing
+directory target.
+
+The correction infers directory targets from the complete snapshot,
+including chains and directory aliases, and passes the type through
+export, worktree synchronization and merge materialization. It neither
+follows host links to make that decision nor changes the archive format,
+stored targets, write order or rollback policy. Portable call-site
+regressions first failed on the earlier engine (**6 failed, 3 passed**);
+the corrected engine passes all **41** new cases, including alias
+resolution, cycles, case folding and both separator conventions.
+
+Directory inference is also bounded by Windows' documented maximum of
+[63 reparse points per path](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points).
+An acyclic graph can repeat aliases exponentially even without a cycle;
+two call-count regressions failed before adding that bound. They now
+pass for both path models without a timing-based test.
+
+The same CI run exposed unrelated fixture assumptions: a text-mode
+write produced CRLF while its oracle expected literal LF, and a test
+intended to create a POSIX backslash filename instead created a normal
+Windows subpath. The fixture now writes exact bytes; only those
+POSIX-only filename cases are platform-gated. The symlink journey still
+has **no skip or xfail**.
+
+The corrected engine is sha256
+`3f7e16565a24030b2f6f5dd74303b78c169924514c6b9b9c2083da8d2d62a782`.
+Its complete source/artifact and native Windows CI reruns are in
+progress. No 1.0.2 tag or publication has been made.
 
 ## 6. Running the harness
 

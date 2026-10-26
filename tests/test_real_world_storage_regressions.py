@@ -276,7 +276,7 @@ def test_archive_basename_occupant_is_preserved(tmp_path, monkeypatch, occupant)
         base.write_bytes(b"precious pre-existing bytes\n")
     elif occupant == "dir":
         base.mkdir()
-        (base / "inner.txt").write_text("keep me\n", encoding="utf-8")
+        (base / "inner.txt").write_bytes(b"keep me\n")
     else:
         link_target = tmp_path / "precious-target.bin"
         link_target.write_bytes(b"precious link target\n")
@@ -1017,6 +1017,9 @@ def test_owned_tmp_removed_after_fsync_failure(tmp_path, monkeypatch, op):
     repo.close()
 
 
+@pytest.mark.skipif(
+    not POSIX, reason="a literal backslash filename is POSIX-only, not a Windows path"
+)
 @pytest.mark.parametrize("op", ["commit", "amend"])
 def test_owned_tmp_removed_after_unrepresentable_member(tmp_path, monkeypatch, op):
     """A member name the archive cannot represent (POSIX '\\' byte) is a

@@ -2,13 +2,14 @@
   "schema_version": 1,
   "campaign_date": "2026-10-25",
   "release_version": "1.0.2",
-  "status": "prepublication_no_skip_checks_passed_fresh_pypi_checks_pending",
-  "engine_sha256": "90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268",
+  "status": "native_windows_directory_link_fix_under_verification",
+  "engine_sha256": "3f7e16565a24030b2f6f5dd74303b78c169924514c6b9b9c2083da8d2d62a782",
+  "pre_native_windows_ci_engine_sha256": "90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268",
   "baseline_engine_sha256": "e459b3f0fd7dc08c920d5565cad5bc0a3bcb1fa5cc124d6af0d49e5a7ba43d2e",
   "counting": "Full-suite totals include the CLI journeys and API regressions; do not add overlapping totals. Initial baselines collected 44 journeys; final no-skip runs collected 48. Each final journey run also made seven separate target-Python fixture/oracle calls, not included in its CLI count.",
   "evidence": "Digests identify the original local JSON traces and JUnit XML. This summary preserves their measured results; raw local traces are not included in the repository.",
-  "source_snapshot_note": "journey_sources_sha256 identifies the completed full-matrix snapshots. A later two-line directory-listing assertion was verified by the directory_enumeration_refinement runs on all three targets; the engine did not change.",
-  "journey_sources_sha256": {
+  "source_snapshot_note": "The pre_native_windows_ci groups retain results for the earlier 90d43459 engine, not the corrected engine. Their full matrices used the listed source snapshots; the later directory-enumeration refinement used its separately recorded hashes. Native Windows CI then found a real forward-directory-link typing defect that Wine did not expose.",
+  "pre_native_windows_ci_journey_sources_sha256": {
     "tests/test_real_world_daily.py": "8415b03dca48adfe1a8b6d7383ada93895e67ed28bbdfec1f470676358f75ab0",
     "tests/test_real_world_merges.py": "40e9ce7c5183e827118a256bf0c98428eb398f6c028b4018c2a3a4913f00ec80",
     "tests/test_real_world_recovery.py": "0233361f065373e2c10be7f147c01f07f9faee968ee12338f2da1d78424dab6b",
@@ -88,7 +89,7 @@
       "evidence_sha256": "6a7ed13547b05c044c641c69d745b288ddf89c8186faa12155b31bea55be07fe"
     }
   ],
-  "final_engine_journeys": [
+  "pre_native_windows_ci_journeys": [
     {
       "target": "checkout313",
       "python": "3.13.16",
@@ -123,7 +124,7 @@
       "evidence_sha256": "dfd1f86deeec5947ab98a0d8f75e2a025ab6c80d6241b2b5d9e074192095b4d2"
     }
   ],
-  "full_suites": [
+  "pre_native_windows_ci_full_suites": [
     {
       "target": "checkout313",
       "passed": 663,
@@ -150,7 +151,7 @@
       "evidence_sha256": "d79c533564520e4e314cf83198146e908470f5821f7d828c7ebb1a65e3d3b666"
     }
   ],
-  "directory_enumeration_refinement": {
+  "pre_native_windows_ci_directory_enumeration_refinement": {
     "description": "All four platform journeys rerun after additionally asserting os.listdir through the restored/exported directory symlink. Counts overlap the full matrix; do not add them.",
     "journey_source_sha256": "70d7f362a319ff256c7d469a6402e9d0e5aaf79dd9fad18ee970ebf5798c9a30",
     "helper_sha256": "4d9167a2b3278ef18b4b26e0172fa6c9c06b1cfdd32758bd772cdf49d39bf10d",
@@ -184,7 +185,7 @@
       }
     ]
   },
-  "local_wheel_api_regressions": [
+  "pre_native_windows_ci_local_wheel_api_regressions": [
     {
       "target": "installed_wheel313",
       "passed": 79,
@@ -202,7 +203,7 @@
       "evidence_sha256": "7892b9e2c09c6019df998e55a397b262d529be790f320cae41ce202c2b21caba"
     }
   ],
-  "artifact_checks": {
+  "pre_native_windows_ci_artifact_checks": {
     "wheel_exactly_one_module": true,
     "wheel_engine_equals_source": true,
     "sdist_engine_equals_source": true,
@@ -214,6 +215,36 @@
     "ruff_check": "passed",
     "ruff_format_check": "passed",
     "git_diff_check": "passed"
+  },
+  "native_windows_ci": {
+    "status": "fix_under_verification",
+    "failed_run": "https://github.com/fabzter/firnpack/actions/runs/40246365170",
+    "failed_commit": "9bd2bf8ec3e802c9eadc0ec48dad09a9425a6bb9",
+    "finding": "All three native Windows jobs failed the unskipped symlink journey: export created a file-type link before its directory target existed. Five POSIX jobs and the wheel guard passed.",
+    "fixture_corrections": "Use exact bytes for the archive occupant fixture; run literal-backslash filename tests only on POSIX, where that character is a filename rather than a separator.",
+    "portable_regression_red": {
+      "passed": 3,
+      "failed": 6,
+      "engine_sha256": "90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268"
+    },
+    "portable_regression_green": {
+      "passed": 41,
+      "failed": 0,
+      "skipped": 0
+    },
+    "bounded_alias_regression_red": {
+      "failed": 2,
+      "engine_sha256": "2c982e204bd207ddc687f3acac0592fc9c9f7224025419584c8a6e246f6c43cd"
+    },
+    "inference_budget": "At most 63 followed links per inferred target, matching the documented Windows reparse-point path maximum; a bounded call-count oracle rejects exponential alias expansion on both path models.",
+    "reparse_limit_source": "https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points",
+    "fix": "Infer directory symlink types from the complete snapshot, including forward targets, chains and directory aliases. Pass the type explicitly through all three materialization paths without changing the layer format, stored targets, write order or rollback policy."
+  },
+  "final_engine_journeys": [],
+  "full_suites": [],
+  "local_wheel_api_regressions": [],
+  "artifact_checks": {
+    "status": "corrected_engine_checks_pending"
   },
   "publication": {
     "status": "pending"

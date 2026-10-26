@@ -233,7 +233,73 @@ def _write_file(fp: Path, data: bytes) -> None:
         raise
 
 
-def _symlink(fp: Path, target: str) -> None:
+def _directory_symlinks(targets: dict[str, str | None]) -> set[str]:
+    """Infer directory-link types from the complete snapshot, not disk order.
+
+    Windows links keep their creation-time type even when a forward
+    target appears later. Resolve directory aliases and chains in the
+    snapshot without following host links or changing stored targets.
+    """
+
+    def key(path):
+        return os.path.normcase(path).replace(os.sep, "/")
+
+    links = {
+        key(path): target for path, target in targets.items() if target is not None
+    }
+    if not links:
+        return set()
+    directories = {""}
+    for path in targets:
+        parts = path.split("/")
+        directories.update(key("/".join(parts[:i])) for i in range(1, len(parts)))
+    result = set()
+    for path, target in targets.items():
+        if not target or os.path.isabs(target) or os.path.splitdrive(target)[0]:
+            continue
+        parts = path.split("/")[:-1]
+        pending = list(reversed(target.replace(os.sep, "/").split("/")))
+        active = {key(path)}
+        # Windows permits at most 63 reparse points in one path.
+        # Bound expanding aliases too, not only recursive link cycles.
+        follows_left = 63
+        while pending:
+            component = pending.pop()
+            if isinstance(component, tuple):
+                active.remove(component[0])
+                continue
+            if component in ("", "."):
+                continue
+            if component == "..":
+                if not parts:
+                    break
+                parts.pop()
+                continue
+            parts.append(component)
+            current = key("/".join(parts))
+            if current in links:
+                following = links[current]
+                if (
+                    not follows_left
+                    or current in active
+                    or os.path.isabs(following)
+                    or os.path.splitdrive(following)[0]
+                ):
+                    break
+                follows_left -= 1
+                active.add(current)
+                parts.pop()
+                pending.append((current,))
+                pending.extend(reversed(following.replace(os.sep, "/").split("/")))
+            elif current not in directories:
+                break
+        else:
+            if key("/".join(parts)) in directories:
+                result.add(path)
+    return result
+
+
+def _symlink(fp: Path, target: str, *, target_is_directory: bool = False) -> None:
     """Create a symbolic link, or say plainly why not.
 
     On Windows creating a link needs Developer Mode or an administrator
@@ -242,7 +308,7 @@ def _symlink(fp: Path, target: str) -> None:
     as one. (The designed probe-and-flatten flow is deferred past 1.0 —
     SPEC §5; this only makes the failure honest.)"""
     try:
-        fp.symlink_to(target)
+        fp.symlink_to(target, target_is_directory=target_is_directory)
     except (FileExistsError, IsADirectoryError, NotADirectoryError):
         raise
     except (OSError, NotImplementedError) as exc:
@@ -1176,13 +1242,14 @@ class Repo:
         """Write leaf entries of `tree` ({path: (bytes|None, target|None,
         exec)}); record created ancestors in `other_dirs` and return the
         set of created leaf paths."""
+        directory_links = _directory_symlinks({p: v[1] for p, v in tree.items()})
         created: set[str] = set()
         for path in sorted(tree):
             data, target, exec_bit = tree[path]
             fp = self.root / path
             self._ensure_parents(fp, created_dirs)
             if target is not None:
-                _symlink(fp, target)
+                _symlink(fp, target, target_is_directory=path in directory_links)
                 created.add(path)
             else:
                 _write_file(fp, data)
@@ -2179,12 +2246,15 @@ class Repo:
         _warn_patch_level_once()
         regular = {p for p, v in manifest.items() if v["target"] is None}
         contents = self._layer_contents(layer_id, regular)
+        directory_links = _directory_symlinks(
+            {p: v["target"] for p, v in manifest.items()}
+        )
         for path in sorted(manifest):
             v = manifest[path]
             fp = dest / path
             fp.parent.mkdir(parents=True, exist_ok=True)
             if v["target"] is not None:
-                _symlink(fp, v["target"])
+                _symlink(fp, v["target"], target_is_directory=path in directory_links)
             else:
                 fp.write_bytes(contents[path])
                 mode = v.get("mode", 0o644)
@@ -3422,6 +3492,9 @@ class Repo:
             )
         self._apply_prepared(prepared)
 
+        directory_links = _directory_symlinks(
+            {p: v["target"] for p, v in manifest.items()}
+        )
         entries = {}
         stats = {}
         for path in sorted(manifest):
@@ -3429,7 +3502,7 @@ class Repo:
             fp = self.root / path
             self._ensure_parents(fp, created_dirs)
             if v["target"] is not None:
-                _symlink(fp, v["target"])
+                _symlink(fp, v["target"], target_is_directory=path in directory_links)
                 if created_paths is not None:
                     created_paths.add(path)
                 st = fp.lstat()
