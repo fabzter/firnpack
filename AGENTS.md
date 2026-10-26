@@ -167,16 +167,23 @@ firnpack/
       + seeded fuzz + e2e CLI + docs/guard suites), ruff clean
 - [x] CI/CD — ci.yml (8-leg matrix + wheel guard) green on main;
       release.yml (test + artifact gates + trusted publishing) passed:
-      **v1.0.1 on PyPI** (2026-10-23). Published wheel/sdist engine
-      bytes match the tag; clean installs on Python 3.13.16 and 3.14.7
-      passed both CLI aliases and the recovery/guard smoke scenarios.
+      **v1.0.2 on PyPI** (2026-10-25). Published wheel/sdist engine
+      bytes match the tag and companion copy; fresh PyPI installs on
+      Python 3.13.16, 3.14.7 and Windows CPython under Wine each passed
+      all 48 chained journeys without skips. Native Windows CI passes.
 - [x] README upgrade + docs/ tree (SPEC §20) — shipped with the
       JSON-contract guard suite
 - [x] Skill repo — github.com/fabzter/agent-skills-firnpack (public):
       SKILL.md + byte-match-guarded firnpack.py copy, submodule pinned
-      at v1.0.1; 49 skill-contract checks and the full engine suite
-      pass against the copy (518 passed, 2 platform-specific skips
-      locally on Python 3.13.16).
+      at v1.0.2; 49 skill-contract checks and the full engine suite
+      pass against the copy (705 passed, 2 platform-specific skips
+      in Linux CI; 704 passed, 3 skips in the independent native run).
+- [x] Real-world verification — 48 chained CLI journeys plus dedicated
+      worktree, storage, byte-write, ignore-compatibility and symlink
+      regressions. Both native full suites pass 704 tests with 3 skips;
+      fresh native PyPI API checks pass 120 tests with 1 filesystem skip.
+      Measured results, artifact identities, historical failures and
+      limits live in `docs/real-world-verification.md` and its JSON record.
 
 ## 9. Working rules for agents in this repo
 
@@ -213,6 +220,5 @@ firnpack/
   normative operator documents. When in doubt: attribution =
   forbidden, operation = permitted.
 
-Last updated: 2026-10-23 — through the spec review close, v0.14
-amendments, M2 completion, and the v1.0.1 safety fixes, verified PyPI
-publication and matching skill update.
+Last updated: 2026-10-25 — through v1.0.2 publication, the no-skip
+real-world campaign, native Windows CI and matching skill update.

@@ -6,12 +6,13 @@ time, on the released artifact and across platforms — checked by
 independent filesystem, archive and metadata oracles (the engine's own
 `verify` is a self-check and is cross-referenced, never trusted alone).
 
-**Status: pre-publication verification passed, including every symlink
-journey; fresh PyPI checks pending.** The revised source, local-wheel
-and companion-copy checks below passed against the final engine.
-Publication and fresh PyPI installations remain separate gates. The
-[machine-readable results](real-world-results.json) preserve counts and
-digests of the completed campaign evidence.
+**Status: verified and published as 1.0.2.** The source, local wheels,
+fresh PyPI installations and companion copy passed the checks below.
+The symlink journey runs without skips on every campaign target;
+native Windows CI also passes. The
+[machine-readable results](real-world-results.json) preserve measured
+counts and evidence digests, separating historical candidates from the
+published engine.
 
 ## 1. What is exercised
 
@@ -36,9 +37,10 @@ worktree file↔directory transition regressions
 (`tests/test_real_world_storage_regressions.py`: archive
 exclusivity/containment, canonical tar naming, the frozen-clock
 archive-collision unit) and the Python-version ignore-pattern compat
-checks (`tests/test_ignore_translate_compat.py`) and exact-byte leaf
-writes (`tests/test_write_file_binary_mode.py`). Their results are
-reported separately from the 48 CLI journeys.
+checks (`tests/test_ignore_translate_compat.py`), exact-byte leaf writes
+(`tests/test_write_file_binary_mode.py`) and directory-link inference
+(`tests/test_symlink_directory_hints.py`). Their results are reported
+separately from the 48 CLI journeys.
 
 ## 2. Independent oracles
 
@@ -143,7 +145,7 @@ must enforce the documented contract, not bless those observations as
 acceptable behaviour.
 
 **Corrected Windows installed-package re-run (v1.0.1):** all 44
-journeys completed through the actual Windows runtime after pip
+journeys completed through Windows CPython under Wine after pip
 `--target` installation: **39 pass / 5 fail, 603 CLI calls**. Module and
 distribution versions both report 1.0.1; the loaded engine matches the
 baseline SHA256 above. All six original host-path oracle failures are
@@ -167,9 +169,10 @@ Integration testing also rejected defects in unpublished candidates.
 The Python 3.14 full suite exposed slashed ignore rules losing their
 matches because `fnmatch.translate` changed its end anchor from `\Z`
 to `\z`; a seven-case compatibility module now covers both forms.
-Later, an intermediate engine passed all 47 native journeys and
-647 full-suite tests but failed 18 Windows journeys: a new exclusive
-write helper used CRT text mode and expanded LF bytes to CRLF. A direct
+Later, an intermediate engine passed all 47 journeys then collected on
+native runtimes (before the campaign grew to 48) and 647 full-suite
+tests, but failed 18 Windows journeys: a new exclusive write helper used
+CRT text mode and expanded LF bytes to CRLF. A direct
 Windows payload proved `b"LF\nCRLF\r\n\0\x1a\xff\n"` was changed.
 The final helper requests binary mode; six byte/flag regression cases
 and the repeated Windows matrix cover that correction. Neither
@@ -187,10 +190,10 @@ relative file and forward directory links without skipping; exact
 POSIX permissions remain asserted, Windows stored modes are checked
 against their documented policy, and an additional imported-POSIX-mode
 journey distinguishes carry-forward from re-stat on Windows. The four
-platform journeys passed natively and under Windows/Wine (51 CLI
-calls on Windows) without a product-code change.
+platform journeys passed natively and under Windows/Wine without a
+product-code change.
 
-## 5. Pre-native-Windows-CI results
+## 5. Results: candidates and published release
 
 These are retained results for the earlier 1.0.2 candidate, engine sha256
 `90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268`,
@@ -217,14 +220,16 @@ each. The source hashes/digests for this later two-line assertion are
 recorded separately in the machine-readable summary; the engine bytes
 did not change.
 
-All four dedicated API regression modules also passed against each
-fresh local wheel installation: **79 passed, 1 skipped** per runtime.
+The four API regression modules present before the directory-link fix
+also passed against each fresh local wheel installation: **79 passed,
+1 skipped** per runtime.
 Both `firn` and `firnpack` aliases work; installed module and
 distribution versions match, and wheel/sdist engine bytes equal the
 source hash above.
 
-Fresh PyPI installations remain pending. Earlier `final-*` evidence
-used the intermediate engine described in §4. `verified-*` identifies
+Fresh PyPI checks had not been run for that earlier candidate.
+Earlier `final-*` evidence used the intermediate engine described in §4.
+`verified-*` identifies
 the earlier candidate before the no-skip harness review; the
 `no-skip-*` journey evidence includes the symlink and imported-POSIX-mode
 journeys on every local target. These green results did not predict the
@@ -267,8 +272,67 @@ has **no skip or xfail**.
 
 The corrected engine is sha256
 `3f7e16565a24030b2f6f5dd74303b78c169924514c6b9b9c2083da8d2d62a782`.
-Its complete source/artifact and native Windows CI reruns are in
-progress. No 1.0.2 tag or publication has been made.
+The corrected commit `2f586cd` passed all nine jobs in
+[CI run 40248551709](https://github.com/fabzter/firnpack/actions/runs/40248551709),
+including all three native Windows jobs. The Windows floor-runtime
+suite reports **645 passed, 62 platform-specific skips**; the symlink
+journey is not one of those skips.
+
+### Corrected candidate results
+
+| Target | Journeys passed | Failed | Skipped | CLI calls |
+|---|---:|---:|---:|---:|
+| Native checkout, Python 3.13.16 | 48 | 0 | 0 | 689 |
+| Native checkout, Python 3.14.7 | 48 | 0 | 0 | 689 |
+| Windows CPython 3.13.16 under Wine | 48 | 0 | 0 | 689 |
+| Fresh local wheel, Python 3.13.16 | 48 | 0 | 0 | 689 |
+| Fresh local wheel, Python 3.14.7 | 48 | 0 | 0 | 689 |
+
+Every row also executes seven target-interpreter fixture/oracle probes.
+All use the same final journey sources, including directory enumeration.
+Both native full suites and the independently preloaded companion copy
+pass **704 tests, 3 skips** each. All five dedicated API regression
+modules pass against both local-wheel installations: **120 passed,
+1 skipped** each. The skips have the same platform reasons described
+above; none is a symlink-journey skip. Wheel/sdist engine bytes match
+the corrected source and both native CLI aliases work.
+
+### Published artifacts and fresh installs
+
+The annotated `v1.0.2` tag points to that exact tested commit.
+The [release workflow](https://github.com/fabzter/firnpack/actions/runs/40249186617)
+passed all three test jobs, artifact gates and trusted publication.
+[1.0.2 is on PyPI](https://pypi.org/project/firnpack/1.0.2/).
+
+New installations downloaded directly from PyPI, independently of the
+local wheels, passed the complete journey set:
+
+| Fresh PyPI target | Journeys passed | Failed | Skipped | CLI calls |
+|---|---:|---:|---:|---:|
+| Native Python 3.13.16 | 48 | 0 | 0 | 689 |
+| Native Python 3.14.7 | 48 | 0 | 0 | 689 |
+| Windows CPython 3.13.16 under Wine | 48 | 0 | 0 | 689 |
+
+Each run also made seven target-interpreter fixture/oracle probes.
+All five dedicated API modules passed against both native PyPI installs:
+**120 passed, 1 filesystem-specific skip** each. Both native CLI aliases
+work. Module and distribution versions are 1.0.2, and the installed
+engine hash matches the tag. The embedded Windows installation uses a
+pip `--target` directory and an explicit installed-module shim, not a
+venv or a claim that its generated executable wrappers are on PATH.
+
+The actual PyPI wheel and sdist were downloaded separately. Their
+archive digests match PyPI's published metadata, and each archive's
+engine bytes equal the tag, source and companion copy. Exact digests
+are in the machine-readable results.
+
+The companion update is commit `71dae951`, pinned to `v1.0.2`.
+Its [CI](https://github.com/fabzter/agent-skills-firnpack/actions/runs/40249829347)
+passed the byte-match guard, all **49** skill-contract checks and the
+engine suite (**705 passed, 2 platform-specific skips** on Linux).
+The independent native companion-copy full-suite result above remains
+separate: **704 passed, 3 skips**. These overlapping suites must not be
+added to the journey totals.
 
 ## 6. Running the harness
 
@@ -327,11 +391,11 @@ FIRNPACK_E2E_PYTHON='["<wineloader>", "Z:\\<path-to>\\python.exe", "-I"]' \
 - **One writer only.** The format assumes a single writer per
   repository (docs/storage.md §3); the harness does not test concurrent
   commands, and no concurrency guarantee is claimed.
-- **Filesystems.** Fixtures live on the host's filesystem (and Wine's
-  Z: mapping of it). Native NTFS permissions/ACLs, real HDD rotational
-  behaviour, OneDrive lock-holder timing and bit-level sync races are
-  not measured by these journeys. Real antivirus/OneDrive handle
-  contention is not proven here.
+- **Filesystems.** Local fixtures live on the host's filesystem (and
+  Wine's Z: mapping); native Windows CI also exercises ordinary Windows
+  filesystem operations. Neither establishes NTFS ACL guarantees, real
+  HDD rotational behaviour, OneDrive lock-holder timing or every sync
+  race. Real antivirus/OneDrive handle contention is not proven here.
 - **Power loss.** Injected I/O failures and damaged-layer fixtures are
   not physical power-loss tests. Actual power-loss/UNC durability and
   fsync effectiveness on consumer drives remain out of scope.

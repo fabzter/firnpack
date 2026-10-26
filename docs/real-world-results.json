@@ -2,7 +2,7 @@
   "schema_version": 1,
   "campaign_date": "2026-10-25",
   "release_version": "1.0.2",
-  "status": "native_windows_directory_link_fix_under_verification",
+  "status": "verified_and_published",
   "engine_sha256": "3f7e16565a24030b2f6f5dd74303b78c169924514c6b9b9c2083da8d2d62a782",
   "pre_native_windows_ci_engine_sha256": "90d43459f57f74c3b5ccc25c5f0bfcfb7861e6729f91fc95ed27efca47148268",
   "baseline_engine_sha256": "e459b3f0fd7dc08c920d5565cad5bc0a3bcb1fa5cc124d6af0d49e5a7ba43d2e",
@@ -217,7 +217,15 @@
     "git_diff_check": "passed"
   },
   "native_windows_ci": {
-    "status": "fix_under_verification",
+    "status": "corrected_candidate_passed_all_nine_jobs",
+    "passed_run": "https://github.com/fabzter/firnpack/actions/runs/40248551709",
+    "passed_commit": "2f586cd7d1db06417df1eddf135d54ff82518e30",
+    "native_windows_floor_suite": {
+      "passed": 645,
+      "failed": 0,
+      "skipped": 62
+    },
+    "symlink_journey_skipped": false,
     "failed_run": "https://github.com/fabzter/firnpack/actions/runs/40246365170",
     "failed_commit": "9bd2bf8ec3e802c9eadc0ec48dad09a9425a6bb9",
     "finding": "All three native Windows jobs failed the unskipped symlink journey: export created a file-type link before its directory target existed. Five POSIX jobs and the wheel guard passed.",
@@ -240,16 +248,206 @@
     "reparse_limit_source": "https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points",
     "fix": "Infer directory symlink types from the complete snapshot, including forward targets, chains and directory aliases. Pass the type explicitly through all three materialization paths without changing the layer format, stored targets, write order or rollback policy."
   },
-  "final_engine_journeys": [],
-  "full_suites": [],
-  "local_wheel_api_regressions": [],
+  "final_journey_sources_sha256": {
+    "tests/test_real_world_daily.py": "8415b03dca48adfe1a8b6d7383ada93895e67ed28bbdfec1f470676358f75ab0",
+    "tests/test_real_world_merges.py": "40e9ce7c5183e827118a256bf0c98428eb398f6c028b4018c2a3a4913f00ec80",
+    "tests/test_real_world_recovery.py": "0233361f065373e2c10be7f147c01f07f9faee968ee12338f2da1d78424dab6b",
+    "tests/test_real_world_compact.py": "0262fe649a9945f94b995463ae2e8ee09f9771ca911c8406a2062e5a8fec81b3",
+    "tests/test_real_world_platform_journeys.py": "70d7f362a319ff256c7d469a6402e9d0e5aaf79dd9fad18ee970ebf5798c9a30",
+    "tests/real_world_support.py": "4d9167a2b3278ef18b4b26e0172fa6c9c06b1cfdd32758bd772cdf49d39bf10d"
+  },
+  "final_engine_journeys": [
+    {
+      "target": "checkout313",
+      "evidence": "bounded-links-checkout313.json",
+      "evidence_sha256": "dbcde72bd8fec1ac89e58aae30063654e62aaba9093283f9e25e6324fc98578f",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "checkout314",
+      "evidence": "bounded-links-checkout314.json",
+      "evidence_sha256": "e22c128cf93c8da159a004e1add37707e2ce0d262e379290766de67ba0ef35cc",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "windows_cpython_wine313",
+      "evidence": "bounded-links-wine313.json",
+      "evidence_sha256": "c5bd5c2dac2ef73dd427053f7a55f7ba52a03c2b7de9adcc9e97c56dbe6e1178",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "local_wheel313",
+      "evidence": "bounded-links-local-wheel313.json",
+      "evidence_sha256": "2ab200a5e02d4f8895080939fa92b2d6d5fbd85702ccd30e53a9484b07986e40",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "local_wheel314",
+      "evidence": "bounded-links-local-wheel314.json",
+      "evidence_sha256": "3bdb0589b2d772c422703628cb733fa33852b17686d94bc22bce83e356a0624d",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    }
+  ],
+  "full_suites": [
+    {
+      "target": "checkout313",
+      "evidence": "bounded-links-full313.xml",
+      "evidence_sha256": "aae56702c78d68a8f5db6bfdf72e88d6da02629fd70a22f426ed9aa91285a94c",
+      "passed": 704,
+      "failed": 0,
+      "skipped": 3
+    },
+    {
+      "target": "checkout314",
+      "evidence": "bounded-links-full314.xml",
+      "evidence_sha256": "1ca71aa1ce0e94b8244358875a1c8dfe3ff43eb2e50399ab57dc5695e92fcb1a",
+      "passed": 704,
+      "failed": 0,
+      "skipped": 3
+    },
+    {
+      "target": "companion_copy313",
+      "evidence": "bounded-links-companion-full313.xml",
+      "evidence_sha256": "ee2b51200e8a56fcca272c11239c87c02406fa2989339872fc32056397fda20e",
+      "passed": 704,
+      "failed": 0,
+      "skipped": 3
+    }
+  ],
+  "local_wheel_api_regressions": [
+    {
+      "target": "local_wheel313",
+      "evidence": "bounded-links-local-wheel-api313.xml",
+      "evidence_sha256": "3ee2c474532722a7526d865b7841a51a6f6b55bd6e73e1287f871f132e3b29e7",
+      "passed": 120,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "target": "local_wheel314",
+      "evidence": "bounded-links-local-wheel-api314.xml",
+      "evidence_sha256": "63127aa34783d3afd8bfb5dfae8a1f0764dee37f1b15fd127327076d44caa7b7",
+      "passed": 120,
+      "failed": 0,
+      "skipped": 1
+    }
+  ],
   "artifact_checks": {
-    "status": "corrected_engine_checks_pending"
+    "status": "published_artifacts_verified",
+    "published_artifact_digests_match_pypi": true,
+    "published_engine_equals_tag_source_and_companion": true,
+    "published_artifacts_sha256": {
+      "firnpack-1.0.2-py3-none-any.whl": "111d0fc1ae74f127d7b62496602d5ca109de6012227136a2970bfe3fe0a8c3d2",
+      "firnpack-1.0.2.tar.gz": "1b12f22278d484914bc39e6a12542f3e0db5729c6f1a82191d56b154b684de24"
+    },
+    "fresh_pypi_native_cli_aliases": [
+      "firn",
+      "firnpack"
+    ],
+    "wheel_exactly_one_module": true,
+    "wheel_engine_equals_source": true,
+    "sdist_engine_equals_source": true,
+    "fresh_local_wheel_cli_aliases": [
+      "firn",
+      "firnpack"
+    ],
+    "installed_module_and_distribution_version_match": true,
+    "ruff_check": "passed",
+    "ruff_format_check": "passed",
+    "git_diff_check": "passed"
   },
   "publication": {
-    "status": "pending"
+    "status": "published_and_fresh_installs_verified",
+    "pypi": "https://pypi.org/project/firnpack/1.0.2/",
+    "github_release": "https://github.com/fabzter/firnpack/releases/tag/v1.0.2",
+    "workflow_conclusion": "success",
+    "tag": "v1.0.2",
+    "commit": "2f586cd7d1db06417df1eddf135d54ff82518e30",
+    "workflow": "https://github.com/fabzter/firnpack/actions/runs/40249186617"
   },
-  "fresh_pypi_installs": [],
+  "fresh_pypi_installs": [
+    {
+      "target": "pypi313",
+      "evidence": "pypi-102-313.json",
+      "evidence_sha256": "4a323b86fd6dd4d5c56344f6dac972e9e8f5bf3ff3ef2e550395182b3df71ed7",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "pypi314",
+      "evidence": "pypi-102-314.json",
+      "evidence_sha256": "db952be51ad8f3ef10b210e4472dc0d553b1a811100cbd5ae9d83e7e840d9741",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    },
+    {
+      "target": "pypi_windows_cpython_wine313",
+      "evidence": "pypi-102-wine313.json",
+      "evidence_sha256": "379ed2466adc4703139f7778af19ec0d5417e350802ad45638d59e95e937bba0",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "cli_calls": 689,
+      "fixture_oracle_calls": 7
+    }
+  ],
+  "fresh_pypi_api_regressions": [
+    {
+      "target": "pypi313",
+      "evidence": "pypi-102-api313.xml",
+      "evidence_sha256": "6b7c8fa7b21329f749da5bd97d337f8e90ae4bad94c00720f8198c39409d7a36",
+      "passed": 120,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "target": "pypi314",
+      "evidence": "pypi-102-api314.xml",
+      "evidence_sha256": "1a64b5c0d1bd68af28d885e850ce76e1c727072123cbd1277b5cc217095c0f46",
+      "passed": 120,
+      "failed": 0,
+      "skipped": 1
+    }
+  ],
+  "companion": {
+    "commit": "71dae951db42d02674911ed4f67ac23168edd1bb",
+    "pinned_tag": "v1.0.2",
+    "copy_equals_tag": true,
+    "ci": "https://github.com/fabzter/agent-skills-firnpack/actions/runs/40249829347",
+    "ci_conclusion": "success",
+    "skill_contract_checks_passed": 49,
+    "ci_engine_suite": {
+      "passed": 705,
+      "failed": 0,
+      "skipped": 2
+    }
+  },
   "limits": [
     "Synthetic projects only; no operations on real user repositories",
     "Wine executes real Windows CPython but is not native NTFS or OneDrive",
