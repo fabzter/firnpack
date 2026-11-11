@@ -94,10 +94,13 @@ JSON:
 ```
 
 `status: "nothing_to_pack"` (exit 0, no layer written) when the tree is
-identical to the head. The `history_reminder` object appears once per
-crossing of the configured threshold (default 50 layers); a successful
-`compact` resets the crossing baseline, so the reminder can fire again when
-history regrows.
+identical to the head. The `history_reminder` object appears once per upward
+crossing of the configured threshold (default 50 layers). A successful
+`compact` resets the crossing baseline to the new layer count: if it drops
+below the threshold, the reminder fires again the next time history crosses
+it; if it leaves the count at or above the threshold, the count never left
+the warned zone, so the reminder stays silent until a later compact drops
+below and history regrows (once per crossing, never nagging).
 
 A refused commit (exit 1) prints, with `--json`, exactly one object on
 stdout and the human sentence on stderr: `{"status": "blocked_by_markers",

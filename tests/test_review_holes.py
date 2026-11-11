@@ -263,6 +263,42 @@ class TestConfig:
         refired = [n for n in (4, 5, 6) if "history_reminder" in commit(n)]
         assert refired, "history reminder stayed silent after the compact"
 
+    def test_reminder_stays_silent_when_compact_stays_above_threshold(
+        self, project, capsys
+    ):
+        """Owner-ratified 2026-11-11 (crossing semantics): a compact that
+        leaves the layer count at or above the threshold does not re-arm the
+        reminder — the count never left the warned zone — but a later
+        compact below the threshold restores the next crossing."""
+        assert firnpack.main(["init"]) == 0
+        self._set_config(project, "history", "reminder_threshold", "3")
+
+        def commit(n):
+            write(project, f"f{n}.txt", f"{n}\n")
+            capsys.readouterr()
+            assert firnpack.main(["commit", "-m", f"c{n}", "--json"]) == 0
+            return json.loads(capsys.readouterr().out)
+
+        for n in (1, 2):
+            assert "history_reminder" not in commit(n)
+        assert "history_reminder" in commit(3)
+        assert "history_reminder" not in commit(4)
+        capsys.readouterr()
+        # keep 3 of 4: executes, and leaves 4 layers — still >= threshold
+        assert firnpack.main(["compact", "--keep", "3", "--yes", "--json"]) == 0
+        capsys.readouterr()
+        for n in (5, 6):
+            assert "history_reminder" not in commit(n), (
+                "a compact that stays at/above the threshold must not "
+                "re-arm the reminder (once per crossing, never nagging)"
+            )
+        # a compact below the threshold restores the next crossing
+        capsys.readouterr()
+        assert firnpack.main(["compact", "--keep", "1", "--yes", "--json"]) == 0
+        capsys.readouterr()
+        refired = [n for n in (7, 8) if "history_reminder" in commit(n)]
+        assert refired, "reminder must fire again after a below-threshold compact"
+
     def test_configured_user_name_becomes_layer_author(self, project):
         assert firnpack.main(["init"]) == 0
         cfg = project / ".firn" / "config"

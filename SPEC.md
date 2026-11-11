@@ -919,8 +919,12 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
   holds N layers (~SIZE) — `firnpack compact` can shrink it"*; JSON:
   `"history_reminder"`), recorded in `config` — rate-limited to once per
   crossing, never nagging. A successful `compact` resets the crossing
-  baseline to the new layer count, so the reminder can fire again when
-  history regrows past the threshold (2026-11-11).
+  baseline to the new layer count (2026-11-11): a compact that drops below
+  the threshold lets the reminder fire again on the next upward crossing,
+  while a compact that leaves the count at or above the threshold does not
+  re-arm it — the count never left the warned zone, and re-nagging right
+  after a deliberate `--keep` choice would violate "never nagging"
+  (semantics ratified by the owner 2026-11-11).
 
 ## 10. Merge algorithm
 

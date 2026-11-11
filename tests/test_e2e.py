@@ -52,6 +52,30 @@ def project(tmp_path):
     return tmp_path / "proj"
 
 
+def patch_extra() -> set:
+    """The interpreter-conditional SPEC §5 layer-4 key as an exact-set delta.
+
+    ``tarfile_patch_warning`` rides on extraction JSON only where this
+    interpreter's tarfile warns, so exact key-set pins add this set rather
+    than dropping the key: the presence/absence stays asserted per
+    interpreter, never ignored.
+    """
+    probe = subprocess.run(
+        [
+            PY,
+            "-c",
+            "import sys; sys.path.insert(0, "
+            + repr(str(MODULE.parent))
+            + "); import firnpack;"
+            " print(firnpack._tarfile_patch_warning() or '')",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return {"tarfile_patch_warning"} if probe.stdout.strip() else set()
+
+
 class TestJourneyNewUser:
     """The README quickstart, verbatim, as a first-time user runs it."""
 
@@ -652,22 +676,10 @@ class TestJsonContractShapes:
 
         # The tarfile patch-level warning is interpreter-dependent (SPEC §5
         # layer 4): on interpreters where it fires, every extraction JSON
-        # carries tarfile_patch_warning. Probe it out-of-process to keep
-        # this module import-free.
-        probe = subprocess.run(
-            [
-                PY,
-                "-c",
-                "import sys; sys.path.insert(0, "
-                + repr(str(MODULE.parent))
-                + "); import firnpack;"
-                " print(firnpack._tarfile_patch_warning() or '')",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        patch_extra = {"tarfile_patch_warning"} if probe.stdout.strip() else set()
+        # carries tarfile_patch_warning. patch_extra() probes it
+        # out-of-process so this module stays import-free and the pins stay
+        # exact per interpreter.
+        extra = patch_extra()
 
         w(project, "a.txt", "one\n")
         out = j("commit", "-m", "c0")
@@ -708,7 +720,7 @@ class TestJsonContractShapes:
         assert set(out) == {"name", "head", "created"}
 
         out = j("switch", "side")
-        assert set(out) == {"ref", "kind", "head"} | patch_extra
+        assert set(out) == {"ref", "kind", "head"} | extra
         w(project, "b.txt", "side\n")
         firn(project, "commit", "-m", "side c")
         out = j("switch", "main")
@@ -716,7 +728,7 @@ class TestJsonContractShapes:
 
         out = j("merge", "side")  # side is ahead -> fast-forward
         assert out["status"] == "fast_forwarded"
-        assert set(out) == {"status", "head", "kind"} | patch_extra
+        assert set(out) == {"status", "head", "kind"} | extra
 
         w(project, "c.txt", "main\n")
         out = j("commit", "-m", "c1")
@@ -744,12 +756,12 @@ class TestJsonContractShapes:
                 "rescue_layer",
                 "previous_head",
             }
-            | patch_extra
+            | extra
         )
 
         dest = project.parent / "exp"
         out = j("export", head[:10], "--to", str(dest))
-        assert set(out) == {"status", "layer_id", "to"} | patch_extra
+        assert set(out) == {"status", "layer_id", "to"} | extra
 
         out = j("verify")
         assert set(out) == {"status", "layers"}
@@ -839,8 +851,7 @@ class TestJsonContractShapes:
         firn(project, "commit", "-m", "main")
         assert firn(project, "merge", "feat", check=False).returncode == 1
         aborted = json.loads(firn(project, "merge", "--abort", "--json").stdout)
-        aborted.pop("tarfile_patch_warning", None)
-        assert set(aborted) == {"status", "head", "rescue_layer"}
+        assert set(aborted) == {"status", "head", "rescue_layer"} | patch_extra()
         assert aborted["status"] == "aborted"
         assert aborted["rescue_layer"] is not None
         assert len(aborted["rescue_layer"]) == 40

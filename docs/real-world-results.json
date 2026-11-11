@@ -479,7 +479,7 @@
     "fresh_pypi_installs": [
       {"target": "pypi313", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "api_passed": 120, "api_failed": 0, "api_skipped": 1, "aliases": ["firn", "firnpack"], "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"},
       {"target": "pypi314", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "api_passed": 120, "api_failed": 0, "api_skipped": 1, "aliases": ["firn", "firnpack"], "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"},
-      {"target": "pypi_windows_cpython_wine313", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "seconds": 355, "note": "embedded CPython 3.13.16 under Wine, pip --target install from PyPI, detached persistent wineserver", "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"}
+      {"target": "pypi_windows_cpython_wine313", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "seconds": 355, "note": "embedded CPython 3.13.16 under Wine, pip --target install from PyPI, detached persistent wineserver; earlier in-session Wine stalls were resolved by this configuration, their root cause was not established", "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"}
     ],
     "companion": {
       "commit": "5b56e387d2bf9cb95efc37da2f6dc745198e1882",
