@@ -79,6 +79,7 @@ jobs:
           "SPEC.md",
           "CHANGELOG.md",
           "/docs/",
+          "docs/real-world-results.json",
           "/.github/workflows/",
       ):
           assert any(needle in n for n in names), (

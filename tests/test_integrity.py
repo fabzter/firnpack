@@ -409,3 +409,41 @@ class TestRebuildWhenDatabaseIsMissing:
         rc, out, _ = _firn(project, "verify", "--rebuild-db", "--json")
         assert rc == 0
         assert json.loads(out)["lost_branches"] == []
+
+
+class TestInBandMetaCrossChecks:
+    """SPEC 9.8: verify compares the recomputed id against the filename,
+    the in-band layer_id and the DB row. The in-band layer_id field and
+    the DB profile column are part of that contract; a layer whose only
+    defect is a forged in-band layer_id or profile must fail verify."""
+
+    def _tamper_meta(self, project, layer_id, mutate_meta):
+        def mutate(items):
+            out = []
+            for m, data in items:
+                if m.name == "__firnpack_meta__":
+                    meta = json.loads(data.decode("utf-8"))
+                    meta = mutate_meta(meta)
+                    data = json.dumps(meta, sort_keys=True).encode("utf-8")
+                out.append((m, data))
+            return out
+
+        _repack(_layer(project, layer_id), mutate)
+
+    def test_tampered_in_band_layer_id_is_caught(self, project):
+        repo, ids = _make(project, 2)
+        repo.close()
+        self._tamper_meta(project, ids[-1], lambda meta: {**meta, "layer_id": "f" * 40})
+        rc, out, err = _firn(project, "verify", "--json")
+        assert rc == 3
+        assert "Traceback" not in err
+        assert "layer_id" in out + err
+
+    def test_tampered_in_band_profile_is_caught(self, project):
+        repo, ids = _make(project, 1)
+        repo.close()
+        self._tamper_meta(project, ids[0], lambda meta: {**meta, "profile": "zstd"})
+        rc, out, err = _firn(project, "verify", "--json")
+        assert rc == 3
+        assert "Traceback" not in err
+        assert "profile" in out + err

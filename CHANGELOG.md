@@ -2,6 +2,58 @@
 
 Hand-maintained (SPEC §24). Semver; releases on `v*` tags.
 
+## 1.0.3 — 2026-11-11
+
+### Fixed
+
+- `merge` of two disconnected histories (for example an amended root layer
+  beside the original root) now refuses with a plain exit-1 message naming
+  the missing common ancestor, instead of a false exit-3
+  "integrity failure: missing layer file: None.firn" on a repository that
+  verifies clean. Exit 3 stays reserved for corruption.
+- The history reminder re-fires after a `compact` once history regrows past
+  `[history] reminder_threshold`: a successful compact resets the crossing
+  baseline instead of silencing the reminder for the repository's life.
+- `verify` now performs the two SPEC §9.8 comparisons it documented but
+  skipped: the in-band `layer_id` field against the layer filename, and the
+  stored `profile` column against the in-band profile. A forged in-band
+  `layer_id` no longer passes a green verify.
+- `merge`'s own pending-merge refusal now carries the normative recognition
+  string "merge is pending", matching every other fence refusal.
+- `history` tips, `compact`'s `branches_remapped` and `maxpath_warning` are
+  lexicographically sorted, as the agent contract promises for arrays.
+- Extraction commands (`export`, `restore`, `switch`, `merge`) carry the
+  tarfile patch-level warning in their `--json` payload as
+  `tarfile_patch_warning`, not only on stderr.
+
+### Changed — documentation truthfulness
+
+- README Status names the shipped 1.0.2 release; the file-count invariant is
+  restated in layers (amend and rescue layers add layers until `compact`
+  reclaims them); the power-cut sentence is a design claim verified under
+  injected I/O failures, not a physical power-loss guarantee.
+- storage.md §3 and decisions D-05 state the ratified gzip-only v1.0 codec
+  truth; SPEC §5 layer 1 describes the extraction mechanism that actually
+  runs (firnpack never calls `tarfile.extractall`) and records the 1.0.2
+  directory-link typing rule with its 63-follow bound (decisions D-24).
+- SPEC §9.9 drops the never-implemented interactive TTY prompt and documents
+  the compact reminder reset; SPEC §10 specifies the disconnected-roots
+  refusal as step 4.
+- usage.md and agent-contract.md document `flattened_pending` as
+  objects-or-null, add the disconnected-histories refusal class, and document
+  the conditional `tarfile_patch_warning` key.
+- The sdist now ships `docs/real-world-results.json`; the release sdist guard
+  and the MANIFEST guard both name it.
+- research/packaging-ci.md states that the version lives in two
+  gate-enforced places rather than a single source.
+
+### Verification
+
+- Nine new regressions (disconnected merge, reminder re-fire, in-band
+  `layer_id`/`profile` tampering, machine-readable patch warning, sorted
+  tips/remapped/maxpath) failed on 1.0.2 before these fixes; seven previously
+  unpinned JSON arms are now pinned in the contract suite.
+
 ## 1.0.2 — 2026-10-25
 
 ### Fixed

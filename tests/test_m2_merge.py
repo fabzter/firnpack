@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from firnpack import DriftError, FirnpackError, Repo  # noqa: E402
+from firnpack import DriftError, FirnpackError, IntegrityError, Repo  # noqa: E402
 
 
 def write(root: Path, rel: str, data, mode=None):
@@ -288,7 +288,7 @@ class TestMergeGuards:
         write(project, "shared.txt", "main\n")
         repo.commit("main final")
         repo.merge("side")  # pending now
-        with pytest.raises(FirnpackError, match="already pending"):
+        with pytest.raises(FirnpackError, match="merge is pending"):
             repo.merge("side")
         repo.close()
 
@@ -399,3 +399,55 @@ def firnpack_merge3(base, ours, theirs):
     import firnpack as _fp
 
     return _fp._merge3_text("t", base, ours, theirs)
+
+
+class TestReview103MergeGuards:
+    """Contrarian-review regressions (2026-11-11).
+
+    - Two legitimately disconnected histories (amend of a root leaves the
+      old root reachable only from another branch) have no LCA. That is a
+      *refusal*, never an exit-3 integrity alarm: exit 3 is the contract's
+      "the glacier is corrupt, stop writing" signal.
+    - Every pending-merge refusal must carry the normative recognition
+      string "merge is pending", including the one `merge` itself emits
+      when a second merge is attempted.
+    """
+
+    def test_merge_of_disconnected_roots_refuses_humane(self, project):
+        repo = Repo.init(project)
+        write(project, "a.txt", "root one\n")
+        repo.commit("root1")
+        repo.branch("side")
+        # amend replaces the head layer with a NEW parentless layer, so
+        # main and side end up on two disconnected roots.
+        write(project, "a.txt", "root two\n")
+        repo.amend("root2")
+        with pytest.raises(FirnpackError) as exc:
+            repo.merge("side")
+        msg = str(exc.value)
+        # exit 3 (IntegrityError) is reserved for "the glacier is corrupt";
+        # a legitimate forked history must be a plain exit-1 refusal.
+        assert not isinstance(exc.value, IntegrityError)
+        assert "integrity failure" not in msg
+        assert "None.firn" not in msg
+        assert "no common ancestor" in msg
+        # the repository itself is sound: verify must stay green
+        assert repo.verify()["status"] == "ok"
+
+    def test_second_merge_while_pending_carries_recognition_string(self, project):
+        repo = Repo.init(project)
+        write(project, "shared.txt", "base\n")
+        repo.commit("base")
+        repo.branch("side")
+        repo.switch("side")
+        write(project, "shared.txt", "side\n")
+        repo.commit("side")
+        repo.switch("main")
+        write(project, "shared.txt", "main\n")
+        repo.commit("main")
+        first = repo.merge("side")
+        assert first["conflicts"] == ["shared.txt"]
+        assert repo.status()["merge_pending"] is True
+        with pytest.raises(FirnpackError) as exc:
+            repo.merge("side")
+        assert "merge is pending" in str(exc.value)

@@ -13,8 +13,10 @@ staging areas, remotes, or a `.git` folder that grows thousands of tiny files
 on a tired hard drive — firnpack is for you.
 
 Every commit is one file: a compressed, checksummed, immutable archive of your
-whole project, stacked on the ones before it. A repository with 100 commits
-holds 102 files. That's the whole design.
+whole project, stacked on the ones before it. A repository whose history is
+100 plain commits holds 102 files — one layer per commit, plus the database
+and the config; `amend` and rescue layers add layers of their own until
+`compact` reclaims them. That's the whole design.
 
 ## Install
 
@@ -134,8 +136,9 @@ Excluded files are never silently hidden: `status` counts them, and
 
 ## Safety, in plain words
 
-- A commit either happens completely or not at all. A power cut mid-pack
-  leaves your repository exactly as it was.
+- A commit either happens completely or not at all: it is designed so that a
+  power cut mid-pack leaves your repository exactly as it was (verified
+  under injected I/O failures; physical power-loss testing is out of scope).
 - Disk trouble — a full drive, a file held open by OneDrive or antivirus —
   ends in one plain sentence that names the problem and the way back
   (`firnpack verify` confirms your history is intact), never a wall of
@@ -169,11 +172,12 @@ Excluded files are never silently hidden: `status` counts them, and
 
 ## Status
 
-Released: `firnpack 1.0.0` is on PyPI (wheel + sdist), tagged `v1.0.0`.
+Released: `firnpack 1.0.3` is on PyPI (wheel + sdist), tagged `v1.0.3`.
 The full command surface above is implemented and tested (unit, property,
 seeded-fuzz and end-to-end CLI suites; CI across Linux, Windows and macOS;
-the published artifact re-verified by installing from PyPI and running the
-quickstart). Development continues on `main`; see
+fresh PyPI installs re-verified with the full chained-journey campaign —
+see [`docs/real-world-verification.md`](docs/real-world-verification.md)).
+Development continues on `main`; see
 [`CHANGELOG.md`](CHANGELOG.md) and [`docs/decisions.md`](docs/decisions.md).
 
 ## License

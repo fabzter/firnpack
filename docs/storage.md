@@ -67,9 +67,9 @@ Branch names and pins live **only** here — layer files do not carry them.
 ## 3. Layer format
 
 A layer file is a canonical TAR stream compressed through an explicit
-pipeline (`gzip` in v1.0; `zstd` via `compression.zstd` when importable,
-with gzip fallback for new layers — old layers always read by their
-recorded profile).
+pipeline. v1.0 reads and writes **gzip only**; the `profile` field is
+recorded per layer so a future reader (e.g. a `zstd` codec) can dispatch on
+it — no v1.0 writer or reader consults anything else.
 
 Members, in order:
 
@@ -129,8 +129,10 @@ mode is cached so `chmod ±x` shows as drift without a re-hash.
    file returns. Layer files are self-naming and self-verifying — a copy
    from any backup, archive zip (`compact --archive`), or another machine
    can be dropped into `layers/` under its id; `verify` confirms it.
-3. **Orphan files**: swept automatically by the next `commit`/`amend`/
-   `compact` (any stray `*.tmp`, and any `.firn` with no database row);
+3. **Orphan files**: swept automatically by the next `commit` that packs,
+   `amend` that writes, or `compact` that executes (any stray `*.tmp`, and
+   any `.firn` with no database row); no-op forms, dry-runs and eligibility
+   refusals do not sweep.
    `verify` lists orphan `.firn` files first so nothing vanishes
    unobserved. A refused command never sweeps, and a leftover that cannot be
    removed is reported on stderr and retried next time.

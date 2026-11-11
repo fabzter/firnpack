@@ -650,6 +650,25 @@ class TestJsonContractShapes:
         def j(*args):
             return json.loads(firn(project, *args, "--json").stdout)
 
+        # The tarfile patch-level warning is interpreter-dependent (SPEC §5
+        # layer 4): on interpreters where it fires, every extraction JSON
+        # carries tarfile_patch_warning. Probe it out-of-process to keep
+        # this module import-free.
+        probe = subprocess.run(
+            [
+                PY,
+                "-c",
+                "import sys; sys.path.insert(0, "
+                + repr(str(MODULE.parent))
+                + "); import firnpack;"
+                " print(firnpack._tarfile_patch_warning() or '')",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        patch_extra = {"tarfile_patch_warning"} if probe.stdout.strip() else set()
+
         w(project, "a.txt", "one\n")
         out = j("commit", "-m", "c0")
         assert set(out) == {"status", "layer_id", "tree_id", "files", "size", "message"}
@@ -689,7 +708,7 @@ class TestJsonContractShapes:
         assert set(out) == {"name", "head", "created"}
 
         out = j("switch", "side")
-        assert set(out) == {"ref", "kind", "head"}
+        assert set(out) == {"ref", "kind", "head"} | patch_extra
         w(project, "b.txt", "side\n")
         firn(project, "commit", "-m", "side c")
         out = j("switch", "main")
@@ -697,7 +716,7 @@ class TestJsonContractShapes:
 
         out = j("merge", "side")  # side is ahead -> fast-forward
         assert out["status"] == "fast_forwarded"
-        assert set(out) == {"status", "head", "kind"}
+        assert set(out) == {"status", "head", "kind"} | patch_extra
 
         w(project, "c.txt", "main\n")
         out = j("commit", "-m", "c1")
@@ -717,11 +736,20 @@ class TestJsonContractShapes:
 
         head = j("history")["commits"][0]["id"]
         out = j("restore", head[:10])
-        assert set(out) == {"status", "layer_id", "rescue_layer", "previous_head"}
+        assert (
+            set(out)
+            == {
+                "status",
+                "layer_id",
+                "rescue_layer",
+                "previous_head",
+            }
+            | patch_extra
+        )
 
         dest = project.parent / "exp"
         out = j("export", head[:10], "--to", str(dest))
-        assert set(out) == {"status", "layer_id", "to"}
+        assert set(out) == {"status", "layer_id", "to"} | patch_extra
 
         out = j("verify")
         assert set(out) == {"status", "layers"}
@@ -761,6 +789,69 @@ class TestJsonContractShapes:
             "created_at",
             "current",
         }
+
+    def test_optional_and_deferred_arms_are_pinned(self, project, tmp_path):
+        """Optional/deferred arms are contracts too (contrarian review
+        FP-16): the reminder's inner keys, status' null flattened_pending,
+        switch's ref echo, amend's sorted maxpath_warning, merge --abort's
+        exact keys, and an empty rebuild's null main_head."""
+        project.mkdir()
+        firn(project, "init")
+        cfg = project / ".firn" / "config"
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace(
+                "reminder_threshold = 50", "reminder_threshold = 2"
+            ),
+            encoding="utf-8",
+        )
+        w(project, "a.txt", "1\n")
+        firn(project, "commit", "-m", "c1")
+        w(project, "a.txt", "2\n")
+        reminded = json.loads(firn(project, "commit", "-m", "c2", "--json").stdout)
+        assert set(reminded["history_reminder"]) == {"layers", "bytes", "hint"}
+
+        out = json.loads(firn(project, "status", "--json").stdout)
+        assert out["flattened_pending"] is None
+
+        firn(project, "branch", "side")
+        out = json.loads(firn(project, "switch", "side", "--json").stdout)
+        assert out["ref"] == "side"
+
+        w(project, "q" * 200 + ".txt", "q\n")
+        firn(project, "commit", "-m", "long")
+        amended = json.loads(
+            firn(project, "amend", "-m", "long amended", "--json").stdout
+        )
+        assert amended["maxpath_warning"] == sorted(amended["maxpath_warning"])
+
+        # a conflicted merge, then abort: the marked-up worktree is a
+        # half-finished resolution, so abort rescues it as a layer first
+        # (usage.md merge); rescue_layer is null only when nothing needed
+        # rescuing.
+        w(project, "shared.txt", "base\n")
+        firn(project, "commit", "-m", "base")
+        firn(project, "branch", "feat")
+        firn(project, "switch", "feat")
+        w(project, "shared.txt", "feat\n")
+        firn(project, "commit", "-m", "feat")
+        firn(project, "switch", "main")
+        w(project, "shared.txt", "main\n")
+        firn(project, "commit", "-m", "main")
+        assert firn(project, "merge", "feat", check=False).returncode == 1
+        aborted = json.loads(firn(project, "merge", "--abort", "--json").stdout)
+        aborted.pop("tarfile_patch_warning", None)
+        assert set(aborted) == {"status", "head", "rescue_layer"}
+        assert aborted["status"] == "aborted"
+        assert aborted["rescue_layer"] is not None
+        assert len(aborted["rescue_layer"]) == 40
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        firn(empty, "init")
+        (empty / ".firn" / "glacier.db").unlink()
+        rebuilt = json.loads(firn(empty, "verify", "--rebuild-db", "--json").stdout)
+        assert rebuilt["main_head"] is None
+        assert rebuilt["lost_branches"] is None
 
 
 class TestJourneyRebuild:
@@ -854,3 +945,80 @@ class TestJourneyRebuild:
         p = firn(project, "verify", "--rebuild-db", check=False)
         assert p.returncode == 3
         assert "parent layer file(s) missing" in p.stderr
+
+
+class TestReview103Contracts:
+    """Contrarian-review regressions (2026-11-11): the documented JSON
+    surface must actually exist and honour the sorted-array contract."""
+
+    def test_tarfile_patch_warning_is_machine_readable(self, project, tmp_path):
+        probe_code = (
+            "import sys; sys.path.insert(0, "
+            + repr(str(MODULE.parent))
+            + "); import firnpack;"
+            " print(firnpack._tarfile_patch_warning() or '')"
+        )
+        probe = subprocess.run(
+            [PY, "-c", probe_code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        warn = probe.stdout.strip()
+        if not warn:
+            pytest.skip("this interpreter's tarfile is confirmed patched")
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "x\n")
+        firn(project, "commit", "-m", "one")
+        out = firn(project, "export", "main", "--to", str(tmp_path / "ex"), "--json")
+        payload = json.loads(out.stdout)
+        assert payload.get("tarfile_patch_warning") == warn
+
+    def test_history_tips_are_sorted(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "1\n")
+        firn(project, "commit", "-m", "c1")
+        for name in ("zeta", "alpha", "mid"):
+            firn(project, "branch", name)
+        hist = json.loads(firn(project, "history", "--json").stdout)
+        tips = hist["commits"][0]["tips"]
+        assert tips == sorted(tips)
+
+    def test_maxpath_warning_payload_is_sorted(self, project):
+        """End-to-end invariant for the documented maxpath_warning array.
+        The deterministic RED proof of the ordering lives in
+        test_review_holes.TestReview103SortedArrays (walk order here is
+        filesystem-dependent, so this arm pins the contract, not the bug).
+        """
+        project.mkdir()
+        firn(project, "init")
+        w(project, "seed.txt", "0\n")
+        firn(project, "commit", "-m", "c1")
+        w(project, "z" * 200 + ".txt", "z\n")
+        w(project, "a" * 200 + ".txt", "a\n")
+        out = firn(project, "commit", "-m", "long names", "--json")
+        warned = json.loads(out.stdout).get("maxpath_warning")
+        assert warned, "expected the long-path warning to fire"
+        assert warned == sorted(warned)
+
+    def test_compact_branches_remapped_is_sorted(self, project):
+        project.mkdir()
+        firn(project, "init")
+        w(project, "a.txt", "1\n")
+        firn(project, "commit", "-m", "c1")
+        w(project, "a.txt", "2\n")
+        firn(project, "commit", "-m", "c2")
+        w(project, "a.txt", "3\n")
+        firn(project, "commit", "-m", "c3")
+        # two branch heads sitting on a KEPT layer: compact rewrites the
+        # kept chain and remaps those branches, so branches_remapped is
+        # non-empty (heads inside the collapsed range are refused instead).
+        firn(project, "branch", "zeta")
+        firn(project, "branch", "alpha")
+        w(project, "a.txt", "4\n")
+        firn(project, "commit", "-m", "c4")
+        out = firn(project, "compact", "--keep", "2", "--yes", "--json")
+        names = [r["name"] for r in json.loads(out.stdout)["branches_remapped"]]
+        assert names and names == sorted(names)

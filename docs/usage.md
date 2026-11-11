@@ -95,7 +95,9 @@ JSON:
 
 `status: "nothing_to_pack"` (exit 0, no layer written) when the tree is
 identical to the head. The `history_reminder` object appears once per
-crossing of the configured threshold (default 50 layers).
+crossing of the configured threshold (default 50 layers); a successful
+`compact` resets the crossing baseline, so the reminder can fire again when
+history regrows.
 
 A refused commit (exit 1) prints, with `--json`, exactly one object on
 stdout and the human sentence on stderr: `{"status": "blocked_by_markers",
@@ -141,8 +143,10 @@ JSON:
 ```
 
 `head` is `null` in an empty repository; `kind` is `"branch"` or `"pin"`
-(`branch` key absent when pinned). `flattened_pending` lists symlink paths
-awaiting a flatten-confirming commit, or `null`. A present nested
+(`branch` key absent when pinned). `flattened_pending` is `null` in v1.0 —
+no command creates it; when the deferred flatten confirmation ships, it will
+list one object per pending symlink (`{"path": "...", ...}`), never bare path
+strings. A present nested
 `.gitignore` prints a stderr warning (root-only ignore rules in v1).
 
 ## history
@@ -231,7 +235,10 @@ firnpack merge --abort [--json]
 ```
 
 3-way merge of BRANCH into the current head. Refuses (exit 1, nothing
-written) on drift or when a merge is already pending. Clean merge writes one
+written) on drift or when a merge is already pending. Histories that share no
+common ancestor (for example an amended root layer beside the original root)
+also refuse with exit 1, naming the missing ancestor — that is a refusal, not
+corruption: `verify` stays green. Clean merge writes one
 layer with two parents; conflicts leave git-style markers in the files and a
 durable pending state (`status.merge_pending`, `merge_theirs` in the DB) —
 resolve the markers and `commit`, or `merge --abort` (which rescues any
@@ -343,7 +350,8 @@ firnpack verify [--rebuild-db] [--json]
 ```
 
 Re-hashes every layer against its filename, cross-checks in-band meta vs the
-database, and checks for dangling parents/second-parents, dangling branch
+database (including the in-band `layer_id` field and the stored `profile`),
+and checks for dangling parents/second-parents, dangling branch
 heads and worktree head, and orphan layer files. Any problem raises an
 integrity failure (exit 3) listing every problem.
 

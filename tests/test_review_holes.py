@@ -240,6 +240,29 @@ class TestConfig:
         # layer 3: already past the threshold — no repeat reminder
         assert "history_reminder" not in commit()
 
+    def test_reminder_refires_after_compact_recrosses_threshold(self, project, capsys):
+        """The reminder's own advice is "run compact". After the user does
+        exactly that and history regrows past the threshold, the reminder
+        must speak again (SPEC 9.9: once per crossing, not once per repo).
+        """
+        assert firnpack.main(["init"]) == 0
+        self._set_config(project, "history", "reminder_threshold", "3")
+
+        def commit(n):
+            write(project, f"f{n}.txt", f"{n}\n")
+            capsys.readouterr()
+            assert firnpack.main(["commit", "-m", f"c{n}", "--json"]) == 0
+            return json.loads(capsys.readouterr().out)
+
+        for n in (1, 2):
+            assert "history_reminder" not in commit(n)
+        assert "history_reminder" in commit(3)
+        capsys.readouterr()
+        assert firnpack.main(["compact", "--keep", "1", "--yes", "--json"]) == 0
+        capsys.readouterr()
+        refired = [n for n in (4, 5, 6) if "history_reminder" in commit(n)]
+        assert refired, "history reminder stayed silent after the compact"
+
     def test_configured_user_name_becomes_layer_author(self, project):
         assert firnpack.main(["init"]) == 0
         cfg = project / ".firn" / "config"
@@ -511,3 +534,21 @@ class TestRebuildTipTieBreak:
             "same-second rebuild must prefer the tip layer, not the "
             "largest id (a parent would silently roll history back)"
         )
+
+
+class TestReview103SortedArrays:
+    """agent-contract.md: "Arrays are sorted (paths lexicographically)".
+    The maxpath warning list is built in worktree walk order today; the
+    contract promises sorted output, so pin the ordering deterministically
+    (walk order is filesystem-dependent and cannot prove it)."""
+
+    def test_maxpath_warning_list_is_sorted(self, project):
+        repo = Repo.init(project)
+        try:
+            long_paths = repo._path_length_warnings(
+                ["z" * 200 + ".txt", "a" * 200 + ".txt"], []
+            )
+        finally:
+            repo.close()
+        assert len(long_paths) == 2
+        assert long_paths == sorted(long_paths)

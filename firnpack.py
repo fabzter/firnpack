@@ -35,7 +35,7 @@ import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 FIRN_DIR = ".firn"
 META_MEMBER = "__firnpack_meta__"
@@ -359,6 +359,16 @@ def _tarfile_patch_warning() -> str | None:
             f"firnpack's own member checks remain active."
         )
     return None
+
+
+def _note_patch_warning(result: dict) -> dict:
+    """SPEC §5 layer 4: the patch-level warning is machine-readable too.
+    Extraction commands carry it in their --json payload as well as on
+    stderr, so an operator never has to parse prose for it."""
+    warn = _tarfile_patch_warning()
+    if warn:
+        result["tarfile_patch_warning"] = warn
+    return result
 
 
 def _canonical_json(obj) -> bytes:
@@ -1531,8 +1541,7 @@ class Repo:
         wt = self._worktree()
         if wt["merge_theirs"] is not None:
             raise FirnpackError(
-                "a merge is already pending — resolve it first "
-                "(commit or merge --abort)"
+                "a merge is pending — resolve it first (commit or merge --abort)"
             )
         # Step 0: drift guard (SPEC §10)
         st = self.status()
@@ -1556,6 +1565,19 @@ class Repo:
                 "head": theirs_id,
                 "kind": wt["head_kind"],
             }
+        if base_id is None:
+            # Two disconnected roots (e.g. an amended root layer beside
+            # the original) have no common ancestor, so there is no base
+            # tree to diff against. That is a refusal, NOT an integrity
+            # failure: exit 3 means "the glacier is corrupt", and this
+            # repository verifies clean.
+            raise FirnpackError(
+                f"these histories share no common ancestor: {ref!r} and "
+                "the current head are disconnected roots, so there is no "
+                "base to merge against. Export one side and combine the "
+                "trees by hand, or recreate the branch from a layer both "
+                "sides descend from."
+            )
 
         # load the three trees
         def tree_of(layer_id):
@@ -1596,7 +1618,7 @@ class Repo:
             }
 
         # conflict path: DB-first pending state, then markers to disk
-        # (SPEC §10 step 6 — crash ordering ratified v0.4)
+        # (SPEC §10 step 7 — crash ordering ratified v0.4)
         with self._db:
             self._db.execute(
                 "UPDATE worktree SET merge_theirs = ? WHERE id = 1",
@@ -1775,11 +1797,11 @@ class Repo:
                     f"path too long to store ({len(path)} chars): {path}. "
                     "Shorten the file name or enable Windows long paths."
                 )
-        return [
+        return sorted(
             path
             for path in paths
             if len(str((self.root / path).resolve())) > MAX_PATH_WARN
-        ]
+        )
 
     @staticmethod
     def _add_path_warning(result: dict, long_paths: list[str]) -> None:
@@ -2267,10 +2289,19 @@ class Repo:
         problems = []
         rows = self._db.execute(
             "SELECT id, tree_id, parent, second_parent, message, author,"
-            " created_at FROM layers"
+            " created_at, profile FROM layers"
         ).fetchall()
         known = {r[0] for r in rows}
-        for layer_id, tree_id, parent, second, _message, _author, _created in rows:
+        for (
+            layer_id,
+            tree_id,
+            parent,
+            second,
+            _message,
+            _author,
+            _created,
+            _profile,
+        ) in rows:
             path = self._layer_path(layer_id)
             if not path.is_file():
                 problems.append(f"missing layer file: {layer_id}")
@@ -2294,6 +2325,11 @@ class Repo:
                 problems.append(
                     f"layer {layer_id}: id mismatch (meta does not hash "
                     f"to the filename)"
+                )
+            if meta.get("layer_id") != layer_id:
+                problems.append(
+                    f"layer {layer_id}: layer_id mismatch (the in-band meta "
+                    f"names a different layer)"
                 )
             # re-hash the file content: the tree id must equal the hash of
             # the bytes actually stored, not just the value the meta claims
@@ -2323,6 +2359,7 @@ class Repo:
                 "message": _message,
                 "author": _author,
                 "created_at": _created,
+                "profile": _profile,
             }
             for column, value in db_row.items():
                 if value != meta[column]:
@@ -3011,6 +3048,14 @@ class Repo:
                 key=lambda x: chain.index(x) if x in chain else 10**9,
             ):
                 self._db.execute("DELETE FROM layers WHERE id = ?", (lid,))
+            # The reminder is rate-limited per upward crossing; a compact
+            # lowers the count, so the crossing baseline must follow it or
+            # the reminder could never fire again (SPEC 9.9).
+            self._db.execute(
+                "INSERT OR REPLACE INTO config (key, value) "
+                "VALUES ('reminder_last_count', ?)",
+                (str(self._db.execute("SELECT COUNT(*) FROM layers").fetchone()[0]),),
+            )
         # delete now-replaced old files (write-once discipline ends
         # only here, under explicit permission): collapsed content,
         # collected garbage, and the old ids of every rewritten layer
@@ -3028,7 +3073,7 @@ class Repo:
             "garbage_collected": len(gc),
             "branches_remapped": [
                 {"name": n, "from": old, "to": remap[old]}
-                for n, old in branch_remaps.items()
+                for n, old in sorted(branch_remaps.items())
             ],
             "new_head": final_head,
             "archive": str(archive_path) if archive_path else None,
@@ -3581,7 +3626,7 @@ class Repo:
                     "message": row[4],
                     "author": row[5],
                     "created_at": row[6],
-                    "tips": tips.get(row[0], []),
+                    "tips": sorted(tips.get(row[0], [])),
                 }
             )
             stack.append(row[3])
@@ -3819,7 +3864,7 @@ def _cmd_restore(args) -> int:
     finally:
         repo.close()
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(_note_patch_warning(result), indent=2))
         return 0
     if result["status"] == "exported":
         print(f"extracted layer {result['layer_id'][:12]} to {result['to']}")
@@ -3847,7 +3892,7 @@ def _cmd_export(args) -> int:
     finally:
         repo.close()
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(_note_patch_warning(result), indent=2))
         return 0
     print(f"exported layer {result['layer_id'][:12]} to {result['to']}")
     return 0
@@ -3976,7 +4021,7 @@ def _cmd_merge(args) -> int:
     finally:
         repo.close()
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(_note_patch_warning(result), indent=2))
         if result["status"] == "conflict":
             return 1
         return 0
@@ -4051,7 +4096,7 @@ def _cmd_switch(args) -> int:
     finally:
         repo.close()
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(_note_patch_warning(result), indent=2))
         return 0
     kind = "branch" if result["kind"] == "branch" else "pinned layer"
     print(f"switched to {kind} {result['ref']} (head {result['head'][:12]})")

@@ -401,10 +401,18 @@ correct dedup, not data loss.
 python.org 2026-10-18; full evidence recorded in
 `research/tarfile-patch-levels.md`; 3.14.8 status corrected in v0.10):
 
-1. **Stdlib filter**: `tarfile.extractall(filter='data')` — rejects absolute
-   paths, `..` traversal, device nodes, unsafe symlinks. Native at the
-   3.13 floor (and PEP 706-backported to 3.10.12+/3.11.4+).
-   A `hasattr(tarfile, 'data_filter')` check guards unusual builds.
+1. **No stdlib extraction at all**: firnpack never calls
+   `tarfile.extractall`/`extract`. It opens a layer read-only
+   (`tarfile.open(mode='r:gz')`), validates the whole member list (layers 2
+   and 3 below), and then materializes each accepted member itself with
+   exclusive binary writes beneath the destination root. The stdlib `data`
+   filter is therefore *not* the mechanism; the
+   `hasattr(tarfile, 'data_filter')` check remains as a capability gate that
+   refuses interpreters lacking the filter class entirely. (Clarified
+   2026-11-11: earlier wording named `extractall(filter='data')` as layer 1;
+   the engine never invoked it. The Python floor of §18 stands on the
+   member-validation and write-discipline layers, plus defense-in-depth for
+   any future stdlib extraction.)
 2. **Structural member allowlist (ours; hardlink-class)**: firnpack only
    ever *writes* regular-file and symlink members (it walks a worktree), so
    at both pack and extract time we validate that a layer's members are
@@ -446,6 +454,23 @@ python.org 2026-10-18; full evidence recorded in
    distro-patched builds don't bump version numbers; a hard gate would
    falsely lock out safe users). `hasattr` cannot detect these bypasses —
    they are bugs *in* the filter — hence the explicit version comparison.
+   The JSON key rides on every extraction command's `--json` payload
+   (`export`, `restore`, `switch`, `merge`) so machine operators see the
+   same warning (2026-11-11).
+
+**Directory-link typing on Windows (shipped 1.0.2, recorded 2026-11-11)**:
+Windows fixes a symbolic link's file/directory type at creation, and a
+forward directory link created before its target directory exists keeps an
+immutable file type. Materialization therefore infers each link's type from
+the **complete snapshot** — following chains and directory aliases, resolving
+aliases before `..`, case-folding and accepting both separators on Windows,
+with active-exit markers for cycles — and passes it explicitly to link
+creation in all three materializers (export, worktree sync, merge). No host
+filesystem link is consulted, stored targets and layer format are unchanged.
+Inference follows at most **63 links per target**, Microsoft's documented
+reparse-point maximum for one path; beyond that it yields no type hint
+rather than expanding alias graphs without bound. Pointer:
+docs/real-world-verification.md §5, research note in docs/decisions.md D-24.
 
 **Symlinks on Windows (Q20 — RESOLVED 2026-10-18, owner ratified with an
 amendment)**: creating symlinks needs `SeCreateSymbolicLinkPrivilege`
@@ -886,14 +911,16 @@ firnpack compact --keep N [--archive DIR] [--dry-run] [--yes]
 - `--archive DIR` — before deletion, the compacted-away range is exported
   to `DIR/firnpack-archive-<date>.zip` (outside `.firn/`, human-visible,
   consciously OneDrive-syncable). Without `--archive` the deletion is
-  unrecoverable, so compact requires `--yes` (or an interactive y/n prompt
-  in a TTY; non-TTY / `--json` demands `--yes`).
+  unrecoverable, so compact requires `--yes` in every context — there is no
+  interactive prompt; `--dry-run` is the preview.
 - **Reminder (owner requirement)**: after a commit, if total layer count
   crosses `[history] reminder_threshold` (default 50) and no reminder was
   shown since the last crossing, `commit` prints one line (human: *"glacier
   holds N layers (~SIZE) — `firnpack compact` can shrink it"*; JSON:
   `"history_reminder"`), recorded in `config` — rate-limited to once per
-  crossing, never nagging.
+  crossing, never nagging. A successful `compact` resets the crossing
+  baseline to the new layer count, so the reminder can fire again when
+  history regrows past the threshold (2026-11-11).
 
 ## 10. Merge algorithm
 
@@ -910,7 +937,12 @@ cases; the algorithm is the boring, correct one:
 3. If base == ours-head → **fast-forward**: move the current branch head to
    theirs-head, sync the worktree (clean — guaranteed by step 0), no new layer.
    (Reported as "fast-forwarded".)
-4. Otherwise, per-path 3-way over union(base, ours, theirs):
+4. If base is None → **disconnected roots** (e.g. an amended root layer
+   beside the original root): refuse, exit 1, saying the histories share no
+   common ancestor and naming the export-and-combine way out. This is a
+   refusal, NOT an integrity failure — the repository verifies clean, and
+   exit 3 stays reserved for corruption (2026-11-11).
+5. Otherwise, per-path 3-way over union(base, ours, theirs):
    - one side changed → take that side;
    - both sides same change → take it;
    - both changed differently:
@@ -918,9 +950,9 @@ cases; the algorithm is the boring, correct one:
      - binaries → conflict, no auto-merge;
      - delete/modify → keep the modified side, report as conflict (Q7);
    - v1 has no rename tracking: a rename is delete+add.
-5. Merged tree (if clean) → one **merge layer**: `parent = ours-head`,
+6. Merged tree (if clean) → one **merge layer**: `parent = ours-head`,
    `second_parent = theirs-head`; one transaction (§9.2 step 5).
-6. Conflicts → exit 1, and a **pending merge** begins. **Write ordering
+7. Conflicts → exit 1, and a **pending merge** begins. **Write ordering
    (crash-correct)**: the DB transaction setting `worktree.merge_theirs =
    theirs-head` commits FIRST; only then are merged file contents + conflict
  markers written to the worktree. Crash between the two leaves a pending merge

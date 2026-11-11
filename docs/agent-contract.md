@@ -39,6 +39,7 @@ one outside the worktree to avoid creating new untracked files.
 | drift guard | 1 | message names drift / "uncommitted" | commit, restore, or export the drift first; never discard on a user's behalf |
 | pending-merge guard | 1 | "merge is pending" | resolve markers + `commit`, or `merge --abort` |
 | merge conflict | 1 | JSON `status: "conflict"` with `conflicts: [paths]` | edit markers, then `commit` (records both parents); or `--abort` |
+| disconnected histories | 1 | message says the histories "share no common ancestor" | not corruption: `verify` stays green; export one side and combine manually, or recreate the branch from a shared layer |
 | unresolved markers | 1 | message "conflict markers (<<<<<<< / >>>>>>>) are still in: …", or `merge conflict — resolve these files first` while a merge is pending; `--json`: `status: "blocked_by_markers"` | remove the markers and commit again; never pass `--allow-markers` on your own |
 | undecided binary conflict | 1 | message "the merge left a binary file undecided: …"; `--json`: `status: "blocked_by_binary_conflict"` | decide with the human: copy their version in, or `merge --abort`; pass `--allow-binary-conflict` only when the human says to keep ours |
 | compact refusal | 1 | message names a branch (merge/delete it, or raise `--keep`), or "still referenced" with no branch (a merge edge: raise `--keep` only; deleting a branch cannot clear it), or the kept-merge second-parent condition | raise `--keep`; delete the named branch only when the message names one; re-plan |
@@ -142,6 +143,12 @@ branch    {name, head, created}
 switch    {ref, kind: branch|pin, head}
 list-br.  {branches: [{name, head, created_at, current}]}
 ```
+
+Extraction commands (`export`, `restore`, `switch`, `merge`) may additionally
+carry `tarfile_patch_warning: "<text>"` on interpreters where the tarfile
+patch-level warning fires (SPEC §5 layer 4); the key is absent otherwise.
+`flattened_pending` is `null` in v1.0; when the deferred flatten confirmation
+ships it will list objects (`{path, …}`), never bare path strings.
 
 Arrays are sorted (paths lexicographically); `null` is used for absent
 parents/second parents; timestamps are UTC ISO-8601 with offset.

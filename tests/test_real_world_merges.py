@@ -24,14 +24,19 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from real_world_support import SEED_IGNORE, World, tree_files
+from real_world_support import (
+    SEED_IGNORE,
+    World,
+    tree_files,
+    without_patch_warning,
+)
 
 GITIGNORE = ".gitignore"
 PENDING_MSGS = {
     "switch": "before switching",
     "restore": "before restoring",
     "amend": "before amending",
-    "merge": "a merge is already pending",
+    "merge": "a merge is pending",
     "compact": "before compacting",
 }
 
@@ -157,6 +162,10 @@ class TestMergeShapes:
         layers_before = world.layer_bytes()
 
         merged = world.json("merge", "feature", "-m", "merge feature work")
+        # SPEC §5 layer 4: on interpreters where the tarfile patch-level
+        # warning fires, extraction JSON also carries tarfile_patch_warning.
+        # The contract keys themselves stay exact.
+        merged.pop("tarfile_patch_warning", None)
         assert merged == {
             "status": "merged",
             "layer_id": merged["layer_id"],
@@ -186,7 +195,10 @@ class TestMergeShapes:
         # Merging again is a no-op: theirs is already an ancestor
         # through the second-parent edge.
         again = world.json("merge", "feature")
-        assert again == {"status": "already_up_to_date", "head": merge_id}
+        assert without_patch_warning(again) == {
+            "status": "already_up_to_date",
+            "head": merge_id,
+        }
         assert world.tree()["notes.txt"] == b"version 1\nfrom feature\n"
 
     def test_drift_guard_and_abort_without_pending(self, tmp_path: Path):

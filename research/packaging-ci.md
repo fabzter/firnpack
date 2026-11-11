@@ -62,7 +62,10 @@
 
 ## Release checklist (per release)
 
-1. Bump `__version__` (single source: `firnpack.__version__`).
+1. Bump the version in BOTH places — `pyproject.toml` (`project.version`)
+   and `firnpack.__version__`. They are not a single source of truth; the
+   release tag gate (release.yml) and `tests/test_guards.py` enforce
+   equality, so neither can drift past a release.
 2. Update CHANGELOG.md.
 3. Tag `vX.Y.Z` → release.yml builds + publishes via trusted publishing.
 4. GitHub Release with notes; skill repo submodule bump follows (repo #2).

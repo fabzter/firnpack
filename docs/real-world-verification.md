@@ -332,7 +332,10 @@ passed the byte-match guard, all **49** skill-contract checks and the
 engine suite (**705 passed, 2 platform-specific skips** on Linux).
 The independent native companion-copy full-suite result above remains
 separate: **704 passed, 3 skips**. These overlapping suites must not be
-added to the journey totals.
+added to the journey totals. The one-test difference between the Linux CI
+run (705/2) and the native macOS run (704/3) is
+`tests/test_real_world_storage_regressions.py::test_commit_refuses_non_utf8_filename_humane`:
+it passes on Linux/ext4 and skips on APFS, which cannot create the fixture.
 
 ## 6. Running the harness
 

@@ -43,6 +43,19 @@ def _command(
 COMMAND = _command()
 
 
+def without_patch_warning(payload: dict) -> dict:
+    """Drop the interpreter-conditional SPEC §5 layer-4 key.
+
+    On interpreters where the tarfile patch-level warning fires, every
+    extraction command's ``--json`` payload also carries
+    ``tarfile_patch_warning``. Exact-shape journey assertions stay
+    interpreter-independent by dropping it here; the key itself is pinned
+    in ``tests/test_e2e.py::TestReview103Contracts``.
+    """
+    payload.pop("tarfile_patch_warning", None)
+    return payload
+
+
 def tree_files(root: Path, *, exclude_admin: bool = True) -> dict:
     """Read actual bytes without following symlinks or applying ignore rules."""
     result = {}

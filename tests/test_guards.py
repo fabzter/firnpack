@@ -57,6 +57,30 @@ class TestPackagingGuards:
             "graft .github",
         ):
             assert needle in manifest, f"MANIFEST.in misses {needle!r}"
+        # the machine-readable campaign record is a document too: a
+        # docs-only *.md glob silently dropped it (contrarian review FP-09)
+        docs_line = next(
+            line
+            for line in manifest.splitlines()
+            if line.startswith("recursive-include docs")
+        )
+        assert "*.json" in docs_line, "MANIFEST.in docs glob misses *.json"
+
+    def test_release_sdist_guard_names_the_results_record(self):
+        rel = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        assert "docs/real-world-results.json" in rel
+
+    def test_readme_status_matches_shipped_version(self):
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        import firnpack
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert f"`firnpack {firnpack.__version__}` is on PyPI" in readme
+        assert f"tagged `v{firnpack.__version__}`" in readme
 
 
 class TestWorkflowGuards:

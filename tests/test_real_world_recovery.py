@@ -39,7 +39,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from real_world_support import SEED_IGNORE, World, tree_files
+from real_world_support import (
+    SEED_IGNORE,
+    World,
+    tree_files,
+    without_patch_warning,
+)
 
 
 def _commit_ids(world: World) -> list[str]:
@@ -177,7 +182,11 @@ def test_export_and_restore_to_destination_rules(tmp_path: Path) -> None:
     # absent destination, including a path whose parents do not exist yet
     absent = tmp_path / "exports" / "deep" / "snap"
     out = world.json("export", c1, "--to", str(absent))
-    assert out == {"status": "exported", "layer_id": c1, "to": out["to"]}
+    assert without_patch_warning(out) == {
+        "status": "exported",
+        "layer_id": c1,
+        "to": out["to"],
+    }
     assert world.host_path(out["to"]) == absent.resolve()
     assert tree_files(absent) == {".gitignore": SEED_IGNORE, "a.txt": b"one\n"}
 
@@ -541,7 +550,7 @@ def test_file_and_directory_transitions_across_restore_and_switch(
     # Restore moves the current branch tip in both directions.
     for target, expected in ((c1, m1), (c2, m2), (c1, m1)):
         out = world.json("restore", target)
-        assert out == {
+        assert without_patch_warning(out) == {
             "status": "restored",
             "layer_id": target,
             "rescue_layer": None,
@@ -563,7 +572,11 @@ def test_file_and_directory_transitions_across_restore_and_switch(
         (c2, c2, "pin", m2),
         (c1, c1, "pin", m1),
     ):
-        assert world.json("switch", ref) == {"ref": ref, "kind": kind, "head": layer}
+        assert without_patch_warning(world.json("switch", ref)) == {
+            "ref": ref,
+            "kind": kind,
+            "head": layer,
+        }
         assert world.tree() == expected
         expected_head = {"id": layer, "kind": kind}
         if kind == "branch":

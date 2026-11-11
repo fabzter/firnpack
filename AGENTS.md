@@ -84,7 +84,10 @@ A **simple, decentralized-ish, single-user version control system** written as a
    `.gitmodules` and a workflow file structural, not optional.)
 7. **Must support**: commit, amend, branching, branch-from-specific-commit, merging,
    history (log). Open question raised by user: *is anything else fundamental missing?*
-   (Research answer: yes — diff/status/checkout/tag; see SPEC.)
+   (Research answer: yes — diff/status/checkout/tag; see SPEC. Owner ratification
+   2026-11-11: diff, status and the checkout equivalent (`switch`/`restore`) ship in
+   v1.0; `tag` is deferred to v1.x on the reserved `refs` table — traceability in
+   docs/decisions.md O-02, SPEC §24.)
 8. **History management (owner, 2026-10-18)**: a `compact` command that squashes
    old commits — always available, never automatic, explicit permission only
    (`--keep N`, `--yes`), with an optional archive export before deletion and a
@@ -127,7 +130,9 @@ firnpack/
 
 - **Target hardware shapes the design**: HDD, OneDrive churning I/O, weak CPU. Fewer,
   larger files; sequential I/O; no background daemons; keep total repo file count tiny.
-  Pinned invariant: repo layout is O(commits) — **N_commits + 2 files** — with
+  Pinned invariant: repo layout is O(layers) — **N_layers + 2 files** (one whole
+  compressed layer per plain commit; `amend` and rescue layers add layers of their
+  own until `compact` reclaims them) — with
   each layer a whole compressed tree (~2–6 MB per 10 MB tree; ~0.2–0.6 GB per
   100 commits — the accepted budget, Q18, reclaimed via `compact`).
 - **Target user shapes the UX**: non-developer. Git-like jargon only where it helps

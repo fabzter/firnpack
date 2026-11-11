@@ -30,10 +30,13 @@ Pointer: SPEC §18, Q17b, research/tarfile-patch-levels.md.
 
 ## D-05 — gzip-only v1.0 (2026-10-18, ratified)
 
-v1.0 writes gzip; zstd arrives through `compression.zstd` when importable,
-with silent gzip fallback for new layers and read-by-recorded-profile
-always. Rationale: portability of the single-file engine over compression
-fashion. Pointer: SPEC §5, §14.
+v1.0 reads and writes gzip only. The per-layer `profile` field is recorded so
+a future codec (e.g. zstd) can dispatch on it; no v1.0 code path imports or
+consults another codec. Rationale: portability of the single-file engine over
+compression fashion. Clarification 2026-11-11 (contrarian review): earlier
+wording here and in storage.md §3 described a zstd write path and
+profile-dispatched reads that v1.0 never implemented; SPEC §14 always promised
+only the per-layer plumbing. Pointer: SPEC §5, §14, storage.md §3.
 
 ## D-06 — Keep-modified conflicts (2026-10-18, ratified)
 
@@ -218,8 +221,26 @@ identical to the tag; clean PyPI installs on Python 3.13.16 and 3.14.7
 passed both CLI aliases, restore/rescue, destination protection, marker
 refusals and integrity verification.
 
+## D-24 — Directory-link typing inferred from the snapshot, bounded at 63 follows (2026-11-11, owner-ratified)
+
+Windows fixes a symlink's file/directory type at creation; a forward
+directory link materialized before its target directory exists keeps an
+immutable file type and later fails directory reads (WinError 5, found by
+native Windows CI on the 1.0.2 candidate). The engine infers each link's type
+from the complete snapshot — chains, directory aliases resolved before `..`,
+case folding and both separators on Windows, active-exit cycle markers — and
+passes it explicitly to link creation in export, worktree sync and merge. No
+host link is read; stored targets, schema, write order and rollback are
+unchanged. Inference follows at most 63 links per target (Microsoft's
+documented reparse-point maximum per path); beyond that it yields no hint
+instead of expanding alias graphs without bound — an acyclic alias graph can
+otherwise repeat exponentially. Pointer: SPEC §5, tests/test_symlink_directory_hints.py,
+docs/real-world-verification.md §5.
+
 ## Open (not settled)
 
 - **O-02 — tags** (refs table reserved), **per-path restore**, rename
-  tracking: v1.x/v2 per SPEC §24.
+  tracking: v1.x/v2 per SPEC §24. The `tag` deferral was ratified by the
+  owner on 2026-11-11 as closing AGENTS §4 requirement 7 for v1.0, with
+  this entry as the traceability note; it remains open work for v1.x.
 - **O-03 — cross-layer dedup**: v2 candidate, only if measured need appears.
