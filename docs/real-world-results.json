@@ -448,6 +448,49 @@
       "skipped": 2
     }
   },
+  "release_103": {
+    "purpose": "Closes the 2026-11-11 read-only contrarian review (21 findings FP-01..FP-21, owner-ratified): two High behavioural fixes, contract and documentation truthfulness, packaging guard strengthening.",
+    "engine_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0",
+    "commit": "5fd1cd8b752f9af6417c702bddf675a549df0ec6",
+    "tag": "v1.0.3",
+    "ci": "https://github.com/fabzter/firnpack/actions/runs/43074089837",
+    "ci_jobs_passed": 9,
+    "release_workflow": "https://github.com/fabzter/firnpack/actions/runs/43076409214",
+    "release_workflow_conclusion": "success",
+    "github_release": "https://github.com/fabzter/firnpack/releases/tag/v1.0.3",
+    "pypi": "https://pypi.org/project/firnpack/1.0.3/",
+    "published_artifacts_sha256": {
+      "firnpack-1.0.3-py3-none-any.whl": "4749afe18a43c4108496be160e2ceae96969855653a2fb31afd6c6872107b125",
+      "firnpack-1.0.3.tar.gz": "4f205d862698984b359511d4335a256cd1d353351fbb1697a5dc5210cc1feeb5"
+    },
+    "published_engine_equals_tag_source_and_companion": true,
+    "full_suites": [
+      {"target": "checkout314", "passed": 717, "failed": 0, "skipped": 3},
+      {"target": "checkout313_floor", "passed": 716, "failed": 0, "skipped": 4}
+    ],
+    "suite_skip_note": "3.14.7 skips: two Windows-CRT exec-bit cases and the APFS non-UTF-8 filename fixture. The floor run adds one skip: the patch-warning contract arm, which only applies where the tarfile warning fires.",
+    "red_on_102_regressions": [
+      "tests/test_m2_merge.py::TestReview103MergeGuards (disconnected-merge refusal; pending-merge recognition string)",
+      "tests/test_review_holes.py::TestConfig::test_reminder_refires_after_compact_recrosses_threshold",
+      "tests/test_review_holes.py::TestReview103SortedArrays::test_maxpath_warning_list_is_sorted",
+      "tests/test_integrity.py::TestInBandMetaCrossChecks (in-band layer_id and profile tampering)",
+      "tests/test_e2e.py::TestReview103Contracts (patch-warning JSON key; sorted tips, remapped, maxpath payload)"
+    ],
+    "fresh_pypi_installs": [
+      {"target": "pypi313", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "api_passed": 120, "api_failed": 0, "api_skipped": 1, "aliases": ["firn", "firnpack"], "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"},
+      {"target": "pypi314", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "api_passed": 120, "api_failed": 0, "api_skipped": 1, "aliases": ["firn", "firnpack"], "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"},
+      {"target": "pypi_windows_cpython_wine313", "journeys_passed": 48, "journeys_failed": 0, "journeys_skipped": 0, "seconds": 355, "note": "embedded CPython 3.13.16 under Wine, pip --target install from PyPI, detached persistent wineserver", "installed_sha256": "0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0"}
+    ],
+    "companion": {
+      "commit": "5b56e387d2bf9cb95efc37da2f6dc745198e1882",
+      "pinned_tag": "v1.0.3",
+      "copy_equals_tag": true,
+      "ci": "https://github.com/fabzter/agent-skills-firnpack/actions/runs/43076759039",
+      "ci_conclusion": "success",
+      "skill_contract_checks_passed": 49,
+      "ci_engine_suite": {"passed": 718, "failed": 0, "skipped": 2}
+    }
+  },
   "limits": [
     "Synthetic projects only; no operations on real user repositories",
     "Wine executes real Windows CPython but is not native NTFS or OneDrive",

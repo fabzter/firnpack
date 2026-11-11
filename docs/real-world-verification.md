@@ -6,7 +6,7 @@ time, on the released artifact and across platforms — checked by
 independent filesystem, archive and metadata oracles (the engine's own
 `verify` is a self-check and is cross-referenced, never trusted alone).
 
-**Status: verified and published as 1.0.2.** The source, local wheels,
+**Status: verified and published through 1.0.3.** The source, local wheels,
 fresh PyPI installations and companion copy passed the checks below.
 The symlink journey runs without skips on every campaign target;
 native Windows CI also passes. The
@@ -336,6 +336,53 @@ added to the journey totals. The one-test difference between the Linux CI
 run (705/2) and the native macOS run (704/3) is
 `tests/test_real_world_storage_regressions.py::test_commit_refuses_non_utf8_filename_humane`:
 it passes on Linux/ext4 and skips on APFS, which cannot create the fixture.
+
+### 1.0.3 — contrarian-review fixes (2026-11-11)
+
+A read-only contrarian review of the whole project (spirit, docs, code and
+shipped features) produced 21 findings; the owner ratified every fix in a
+single release. Behavioural: a merge of two disconnected histories now
+refuses with exit 1 and a message naming the missing common ancestor,
+instead of a false exit-3 integrity alarm on a repository that verifies
+clean; a successful `compact` resets the reminder's crossing baseline so it
+can fire again; `verify` performs the two SPEC §9.8 comparisons it
+documented but skipped (in-band `layer_id` vs filename, stored `profile` vs
+in-band profile); extraction JSON carries `tarfile_patch_warning`; the
+pending-merge recognition string is uniform across all six fence refusals;
+and `tips`, `branches_remapped` and `maxpath_warning` are sorted as the
+agent contract promises. Documentation: the gzip-only codec truth, the real
+extraction mechanism (firnpack never calls `tarfile.extractall`), removal of
+the never-implemented TTY prompt, the layer-based file-count invariant, the
+ratified `tag` deferral with traceability, the directory-link typing rule
+(decisions D-24), the softened power-cut claim, and an sdist that now ships
+this results record.
+
+Verification: the nine new regressions were red on 1.0.2 before the fixes
+(disconnected merge, reminder re-fire, in-band `layer_id`/`profile`
+tampering, machine-readable patch warning, sorted tips/remapped/maxpath),
+and seven previously unpinned JSON arms are now pinned. Full suites:
+**717 passed, 3 skips** on 3.14.7 and **716 passed, 4 skips** on the
+3.13.16 floor (the extra floor skip is the patch-warning contract arm,
+which only applies where the warning fires).
+[CI run 43074089837](https://github.com/fabzter/firnpack/actions/runs/43074089837)
+passed all nine jobs;
+[release run 43076409214](https://github.com/fabzter/firnpack/actions/runs/43076409214)
+published 1.0.3. Published wheel digest
+`4749afe18a43c4108496be160e2ceae96969855653a2fb31afd6c6872107b125` and
+sdist digest
+`4f205d862698984b359511d4335a256cd1d353351fbb1697a5dc5210cc1feeb5` match
+PyPI's metadata; both archives' engine bytes equal the tag, the source and
+the companion copy at sha256
+`0a4648a00e6f148c495840166d02fd1a58394f39291d0ad6278e88129d48cdb0`.
+Fresh PyPI installations on 3.13.16 and 3.14.7 passed all **48 journeys
+without skips** and the **120 API regressions (1 filesystem skip)** each,
+with both CLI aliases reporting 1.0.3. A fresh PyPI `--target` installation
+into embedded Windows CPython 3.13.16 (Wine, detached persistent server)
+also passed all **48 journeys without skips** in 355 s. The companion update
+`5b56e387` repins `v1.0.3`; its
+[CI](https://github.com/fabzter/agent-skills-firnpack/actions/runs/43076759039)
+passed the byte-match guard, all 49 contract checks and the engine suite
+(**718 passed, 2 skips** on Linux).
 
 ## 6. Running the harness
 

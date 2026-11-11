@@ -189,6 +189,18 @@ firnpack/
       fresh native PyPI API checks pass 120 tests with 1 filesystem skip.
       Measured results, artifact identities, historical failures and
       limits live in `docs/real-world-verification.md` and its JSON record.
+- [x] Contrarian-review release — **v1.0.3 on PyPI** (2026-11-11): closes a
+      read-only whole-project review (21 findings, owner-ratified). Two High
+      behavioural fixes (disconnected-history merge refuses with exit 1
+      instead of a false exit-3 integrity alarm; the compact reminder resets
+      its crossing baseline), `verify` gains its two documented SPEC §9.8
+      comparisons, extraction JSON carries `tarfile_patch_warning`, uniform
+      pending-merge recognition, sorted documented arrays, plus documentation
+      truthfulness (gzip-only codec, real extraction mechanism, no TTY
+      prompt, layer-based invariant, ratified `tag` deferral, D-24) and an
+      sdist that ships the results record. Nine regressions were red on
+      1.0.2 first; suites 717/3 (3.14.7) and 716/4 (floor); nine-job CI and
+      the release workflow green; companion repinned with 49 contracts green.
 
 ## 9. Working rules for agents in this repo
 
@@ -225,5 +237,5 @@ firnpack/
   normative operator documents. When in doubt: attribution =
   forbidden, operation = permitted.
 
-Last updated: 2026-10-25 — through v1.0.2 publication, the no-skip
-real-world campaign, native Windows CI and matching skill update.
+Last updated: 2026-11-11 — through the contrarian-review 1.0.3 release and
+the matching skill update.
